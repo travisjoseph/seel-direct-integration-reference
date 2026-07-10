@@ -1,21 +1,19 @@
 /**
- * Reference Node.js client for Seel's ecommerce partner APIs (direct path).
+ * Node.js client for Seel's ecommerce APIs (the direct-integration path).
  *
- * Wraps the public /v1/ecommerce/* APIs documented at
- * https://developer.seel.com - specifically the flow in the SaaS Platform
- * Integration Quickstart
+ * Wraps the public /v1/ecommerce/* APIs and follows the flow in the SaaS
+ * Platform Integration Quickstart
  * (https://developer.seel.com/docs/platform-direct-integration):
  *
  *   merchant enables program -> createMerchant (+ batch order-history backfill)
  *   checkout                 -> createQuote (widget renders from the response)
- *   order placed             -> createOrder (ALL orders, opted-in or not;
+ *   order placed             -> createOrder (all orders, opted in or not;
  *                               seel_services carries quote_id + price on opt-in)
  *   order shipped/delivered  -> createFulfillment / updateFulfillment
  *   order changed/cancelled  -> updateOrder / cancelOrder
  *   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
  *
- * Node 18+ standard library only (global fetch, node:crypto), no
- * dependencies - intended to be readable enough to port to any stack.
+ * Node 18+ stdlib only (global fetch, node:crypto). Written to be ported.
  */
 
 "use strict";
@@ -24,12 +22,12 @@ const crypto = require("node:crypto");
 
 const SANDBOX_BASE_URL = "https://api-test.seel.com";
 const PRODUCTION_BASE_URL = "https://api.seel.com";
-const API_VERSION = "2.6.0"; // single source of truth for the pinned API version
+const API_VERSION = "2.6.0"; // the pinned API version; all four language ports match
 
 /**
- * Thrown on any non-2xx response. Carries the HTTP status and Seel's
- * JSON error body, which includes the actionable message (e.g. which
- * required field is missing) and a trace_id to quote in support requests.
+ * Thrown on any non-2xx response. Carries the status and Seel's JSON
+ * error body: the message names the offending field, and the trace_id
+ * is what Seel support will ask for.
  */
 class SeelAPIError extends Error {
   constructor(status, body) {
@@ -81,9 +79,9 @@ class SeelClient {
   // -- Merchants ----------------------------------------------------------
 
   /**
-   * Onboard one retailer. Called once per retailer when they enable
-   * the program (all grouped under your platform organization on Seel's
-   * side). Follow with createOrdersBatch for at least 30 days of order
+   * Onboard one retailer. Call it when they enable the program;
+   * retailers group under your platform organization on Seel's side.
+   * Follow with createOrdersBatch and at least 30 days of order
    * history so Seel can run risk analysis.
    */
   createMerchant(payload) {
@@ -91,8 +89,8 @@ class SeelClient {
   }
 
   /**
-   * Toggle/disable the program for a retailer (include the reason
-   * when disabling), or sync changed protection settings.
+   * Sync changed protection settings, or disable the program for a
+   * retailer - include the reason when disabling.
    */
   updateMerchant(merchantId, payload) {
     return this._request("POST", `/ecommerce/merchants/${merchantId}`, payload);
@@ -101,14 +99,14 @@ class SeelClient {
   // -- Quotes -------------------------------------------------------------
 
   /**
-   * Quote a cart at checkout. The response (price, display_amounts,
-   * widget_copy, extra_info) carries all the copy the storefront widget
-   * renders. Re-quote on cart changes: address change, discount applied,
+   * Quote a cart at checkout. The response carries everything the
+   * storefront widget renders: price, display_amounts, widget_copy,
+   * extra_info. Re-quote whenever the cart changes - address, discount,
    * item removed.
    *
-   * See the README "Required fields and validation rules" section and
-   * https://developer.seel.com/reference/createquote for the full
-   * required-field list, including the constraint
+   * The README's validation section and
+   * https://developer.seel.com/reference/createquote list the required
+   * fields, including
    * price + sales_tax - allocated_discounts == final_price.
    */
   createQuote(payload) {
@@ -122,19 +120,17 @@ class SeelClient {
   // -- Orders -------------------------------------------------------------
 
   /**
-   * Sync every new order, whether or not the shopper opted in. When
-   * they did, include the seel_services object with the quote_id and
-   * price from the latest quote - this is what mints the contract and
-   * triggers the contract.created webhook. Line items must match the
-   * quoted cart.
+   * Sync every new order, opted in or not. On opt-in, include the
+   * seel_services object with the quote_id and price from the latest
+   * quote - that mints the contract and fires the contract.created
+   * webhook. Line items must match the quoted cart.
    */
   createOrder(payload) {
     return this._request("POST", "/ecommerce/orders", payload);
   }
 
   /**
-   * Backfill historical orders (at least 30 days, at merchant
-   * onboarding).
+   * Backfill order history at onboarding - at least 30 days.
    */
   createOrdersBatch(payload) {
     return this._request("POST", "/ecommerce/orders/batch", payload);
@@ -148,9 +144,9 @@ class SeelClient {
   }
 
   /**
-   * Cancel a synced order; any WFP coverage on it cancels
-   * automatically. Refunding the WFP fee + tax to the shopper is the
-   * platform's job (see "Cancellation" in the README integration flow).
+   * Cancel a synced order; its WFP coverage cancels with it.
+   * Refunding the WFP fee and tax to the shopper is the platform's
+   * job - see Cancellation in the README.
    */
   cancelOrder(orderId) {
     return this._request("POST", `/ecommerce/orders/${orderId}/cancel`);

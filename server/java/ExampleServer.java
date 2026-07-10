@@ -2,10 +2,6 @@
  * Example backend for the direct-integration path. JDK 17+ standard library
  * only, no dependencies.
  *
- * Compile and run:
- *   javac SeelClient.java ExampleServer.java
- *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... java ExampleServer
- *
  * Two routes:
  *   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
  *                           key and forwards to Seel's Quote API (the widget
@@ -14,16 +10,19 @@
  *                           events: verifies HMAC, ACKs 200 fast, then hands
  *                           off for internal fan-out
  *
- * To drive the widget demo against a live sandbox, both steps are required
- * (this server does not serve the demo page itself):
+ * Compile and run:
+ *   javac SeelClient.java ExampleServer.java
+ *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... java ExampleServer
+ *
+ * To drive the widget demo against a live sandbox, two steps - this server
+ * doesn't serve the demo page:
  *   1. run this server
  *   2. in widget/demo.html, replace the mock quoteFetcher with
  *      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
  *
- * JSON handling: like SeelClient, this example works in raw JSON strings so
- * it stays dependency-free. In your real backend, use whatever JSON library
- * your stack already has (Jackson, Gson, ...) instead of the string
- * manipulation demoed here.
+ * Like SeelClient, this example works in raw JSON strings to stay
+ * dependency-free. In a real backend, use your own JSON library (Jackson,
+ * Gson, ...) instead of the string splicing demoed here.
  */
 
 import com.sun.net.httpserver.HttpExchange;
@@ -40,9 +39,9 @@ public class ExampleServer {
     static final String API_KEY = env("SEEL_API_KEY", "");
     static final String WEBHOOK_SECRET = env("SEEL_WEBHOOK_SECRET", "");
     static final String BASE_URL = env("SEEL_BASE_URL", SeelClient.SANDBOX_BASE_URL);
-    // Program-specific values, provided by Seel during onboarding. When set,
-    // the quote proxy injects them server-side so storefront code carries no
-    // program-specific values and stays identical across programs.
+    // Program values from Seel onboarding. When set, the proxy stamps them
+    // into every quote request, so storefront code stays identical across
+    // programs.
     static final String MERCHANT_ID = env("SEEL_MERCHANT_ID", "");
     static final String QUOTE_TYPE = env("SEEL_QUOTE_TYPE", "");
 
@@ -55,7 +54,7 @@ public class ExampleServer {
 
     /**
      * Internal fan-out. Parse the payload with your JSON library, map
-     * merchant_id/order_id to your own retailer code here and route to your
+     * merchant_id/order_id to your own retailer code and route to your
      * systems. Dedupe on id + type first, since delivery is at-least-once.
      * In production, queue this work off the request thread instead of
      * processing inline.
@@ -71,8 +70,8 @@ public class ExampleServer {
         // demo only; lock down in prod
         exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
         exchange.sendResponseHeaders(status, data.length);
-        // try-with-resources closes the response body stream, which flushes
-        // the full response to the client.
+        // Closing the response body stream (try-with-resources) flushes the
+        // full response to the client.
         try (OutputStream out = exchange.getResponseBody()) {
             out.write(data);
         }
@@ -137,15 +136,14 @@ public class ExampleServer {
             return;
         }
 
-        // Inject the program values right after the opening "{" of the JSON
-        // object. Demo-only convenience: without a JSON library we splice
-        // strings instead of modifying a parsed object. The values are ALWAYS
-        // inserted; if the storefront sent merchant_id or type as well, the
-        // object ends up with duplicate keys and which value Seel uses is NOT
-        // guaranteed (JSON parsers differ on duplicate-key precedence), so
-        // storefront code should omit these keys entirely, as the README
-        // describes. In your real backend, parse the body and set the fields
-        // with your JSON library instead.
+        // Splice the program values in right after the opening "{" - a
+        // demo-only shortcut for having no JSON library. They are always
+        // inserted, so if the storefront also sent merchant_id or type the
+        // object gets duplicate keys, and which value Seel uses isn't
+        // guaranteed (parsers differ on duplicate-key precedence).
+        // Storefront code should omit these keys, as the README describes.
+        // In a real backend, parse the body and set the fields with your
+        // JSON library.
         StringBuilder injected = new StringBuilder();
         if (!MERCHANT_ID.isEmpty()) {
             injected.append("\"merchant_id\":\"").append(jsonEscape(MERCHANT_ID)).append("\"");
@@ -168,8 +166,8 @@ public class ExampleServer {
         try {
             respond(exchange, 200, client.createQuote(params));
         } catch (SeelApiException e) {
-            // Forward Seel's status + error body: it names the missing or
-            // inconsistent field, which is what the integrator needs.
+            // Forward Seel's status and error body - it names the
+            // offending field.
             String errorBody = e.getBody() == null ? "" : e.getBody().strip();
             if (errorBody.startsWith("{")) {
                 respond(exchange, e.getStatus(), errorBody);
@@ -197,9 +195,9 @@ public class ExampleServer {
             respond(exchange, 401, "{\"error\": \"invalid signature\"}");
             return;
         }
-        // ACK and flush before doing any work: Seel retries anything not
-        // answered with a 200 within 10 seconds. respond() closes the
-        // response body stream, which flushes the response to the client.
+        // ACK before doing any work: Seel retries anything not answered
+        // with a 200 within 10 seconds. respond() closes the body stream,
+        // which flushes the response to the client.
         respond(exchange, 200, "{\"ok\": true}");
         try {
             handleWebhookEvent(new String(body, StandardCharsets.UTF_8));
@@ -214,7 +212,7 @@ public class ExampleServer {
         }
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
         server.createContext("/", ExampleServer::handle);
-        // Thread pool so webhook deliveries do not queue behind each other.
+        // Thread pool so webhook deliveries don't queue behind each other.
         server.setExecutor(Executors.newFixedThreadPool(8));
         System.out.println("listening on http://localhost:" + PORT);
         server.start();

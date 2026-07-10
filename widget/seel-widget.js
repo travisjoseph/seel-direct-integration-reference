@@ -1,25 +1,22 @@
 /**
- * Seel Worry-Free Purchase (WFP) opt-in widget - self-hosted reference build.
+ * Seel Worry-Free Purchase (WFP) opt-in widget, self-hosted.
  *
- * WFP is the API-level name for the Worry-Free Delivery program; element IDs
- * and API fields use "wfp".
+ * The API calls the program WFP, so element IDs and fields say "wfp" even
+ * where the product is sold as Worry-Free Delivery.
  *
- * Exposes window.SeelSDK with createQuote() / onCheck() / onUncheck()
- * (matching the interface of Seel's hosted widget bundle, see
- * https://developer.seel.com) plus configure(), which is specific to this
- * self-hosted build. Code written against createQuote/onCheck/onUncheck can
- * switch to a Seel-hosted bundle with a script-src change only.
+ * Exposes window.SeelSDK: createQuote(), onCheck(), onUncheck() - the same
+ * interface as Seel's hosted bundle (developer.seel.com) - plus configure(),
+ * which is specific to this build. Swapping to a hosted bundle later is a
+ * script-src change.
  *
- * The Seel API key must never reach the browser. createQuote() POSTs the
- * quote params to a backend proxy (config.quoteEndpoint) which attaches the
- * key and forwards to Seel. Reference proxies in ../server/ (Python, Node,
- * Rust, Java).
+ * The API key never reaches the browser. createQuote() POSTs the params to
+ * a backend proxy (config.quoteEndpoint) that attaches the key and forwards
+ * to Seel. Reference proxies live in ../server/.
  *
- * Callback semantics: onCheck/onUncheck fire only when the opt-in state
- * changes (user toggles, default-on first render, coverage becoming
- * ineligible). Re-quotes triggered by cart or address changes deliver the
- * fresh price through the createQuote callback instead, and a shopper's
- * explicit opt-out is preserved across re-quotes.
+ * onCheck/onUncheck fire only when the opt-in state changes: a toggle, a
+ * default-on first render, or coverage turning ineligible. Re-quotes hand
+ * the fresh price to the createQuote callback, and a shopper's opt-out
+ * survives re-quotes.
  */
 (function () {
   "use strict";
@@ -68,8 +65,8 @@
   }
 
   /**
-   * quoteData passed to callbacks: camelCase keys as documented below, with
-   * the raw API response preserved on .raw.
+   * The quoteData passed to callbacks: camelCase keys, raw API response
+   * on .raw.
    */
   function normalizeQuote(q) {
     var extra = q.extra_info || {};
@@ -194,13 +191,13 @@
   }
 
   /**
-   * quoteParams: the Seel quote payload (line_items, shipping_address,
-   * customer, client_ip, is_default_on, ...). Full field reference:
+   * quoteParams is the Seel quote payload: line_items, shipping_address,
+   * customer, client_ip, is_default_on. Full field reference:
    * https://developer.seel.com/reference/createquote
    *
-   * Call on cart load and again on every cart change (address change,
-   * discount applied, item removed). Out-of-order responses are discarded,
-   * so rapid successive calls are safe.
+   * Call it on cart load and on every cart change - address, discount, item
+   * removed. Out-of-order responses are discarded, so rapid successive
+   * calls are safe.
    */
   function createQuote(quoteParams, callback) {
     var seq = ++state.requestSeq;

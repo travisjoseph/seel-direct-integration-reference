@@ -1,27 +1,24 @@
 /*
- * Reference Java client for Seel's ecommerce partner APIs (direct path).
+ * Java client for Seel's ecommerce APIs (the direct-integration path).
  *
- * Wraps the public /v1/ecommerce/* APIs documented at
- * https://developer.seel.com - specifically the flow in the SaaS Platform
- * Integration Quickstart
+ * Wraps the public /v1/ecommerce/* APIs and follows the flow in the SaaS
+ * Platform Integration Quickstart
  * (https://developer.seel.com/docs/platform-direct-integration):
  *
  *   merchant enables program -> createMerchant (+ batch order-history backfill)
  *   checkout                 -> createQuote (widget renders from the response)
- *   order placed             -> createOrder (ALL orders, opted-in or not;
+ *   order placed             -> createOrder (all orders, opted in or not;
  *                               seel_services carries quote_id + price on opt-in)
  *   order shipped/delivered  -> createFulfillment / updateFulfillment
  *   order changed/cancelled  -> updateOrder / cancelOrder
  *   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
  *
- * JDK 17+ standard library only, no dependencies - intended to be readable
- * enough to port to any stack.
+ * JDK 17+ standard library only, no dependencies.
  *
- * JSON handling: the JDK ships no JSON library, so this client deliberately
- * works in raw JSON strings - every method accepts a JSON string payload and
- * returns Seel's JSON response body as a string. Bring your own JSON library
- * (Jackson, Gson, whatever your stack already uses) to build payloads and
- * parse responses; this file stays dependency-free.
+ * JSON: the JDK ships none, so every method takes a JSON string payload and
+ * returns Seel's JSON response as a string. Bring your own JSON library
+ * (Jackson, Gson, whatever you already use) to build payloads and parse
+ * responses; this file stays dependency-free.
  */
 
 import java.io.IOException;
@@ -41,7 +38,7 @@ public class SeelClient {
 
     public static final String SANDBOX_BASE_URL = "https://api-test.seel.com";
     public static final String PRODUCTION_BASE_URL = "https://api.seel.com";
-    /** Single source of truth for the pinned API version. */
+    /** The pinned API version; all four language ports match. */
     public static final String API_VERSION = "2.6.0";
 
     private static final int DEFAULT_TIMEOUT_SECONDS = 15;
@@ -97,10 +94,10 @@ public class SeelClient {
     // -- Merchants -----------------------------------------------------------
 
     /**
-     * Onboard one retailer. Called once per retailer when they enable the
-     * program (all grouped under your platform organization on Seel's side).
-     * Follow with createOrdersBatch for at least 30 days of order history so
-     * Seel can run risk analysis.
+     * Onboard one retailer. Call it when they enable the program; retailers
+     * group under your platform organization on Seel's side. Follow with
+     * createOrdersBatch and at least 30 days of order history so Seel can
+     * run risk analysis.
      */
     public String createMerchant(String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
@@ -108,8 +105,8 @@ public class SeelClient {
     }
 
     /**
-     * Toggle/disable the program for a retailer (include the reason when
-     * disabling), or sync changed protection settings.
+     * Sync changed protection settings, or disable the program for a
+     * retailer - include the reason when disabling.
      */
     public String updateMerchant(String merchantId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
@@ -119,14 +116,14 @@ public class SeelClient {
     // -- Quotes --------------------------------------------------------------
 
     /**
-     * Quote a cart at checkout. The response (price, display_amounts,
-     * widget_copy, extra_info) carries all the copy the storefront widget
-     * renders. Re-quote on cart changes: address change, discount applied,
+     * Quote a cart at checkout. The response carries everything the
+     * storefront widget renders: price, display_amounts, widget_copy,
+     * extra_info. Re-quote whenever the cart changes - address, discount,
      * item removed.
      *
-     * <p>See the README "Required fields and validation rules" section and
-     * https://developer.seel.com/reference/createquote for the full
-     * required-field list, including the constraint
+     * <p>The README's validation section and
+     * https://developer.seel.com/reference/createquote list the required
+     * fields, including
      * price + sales_tax - allocated_discounts == final_price.
      */
     public String createQuote(String payloadJson)
@@ -142,10 +139,10 @@ public class SeelClient {
     // -- Orders --------------------------------------------------------------
 
     /**
-     * Sync every new order, whether or not the shopper opted in. When they
-     * did, include the seel_services object with the quote_id and price from
-     * the latest quote - this is what mints the contract and triggers the
-     * contract.created webhook. Line items must match the quoted cart.
+     * Sync every new order, opted in or not. On opt-in, include the
+     * seel_services object with the quote_id and price from the latest
+     * quote - that mints the contract and fires the contract.created
+     * webhook. Line items must match the quoted cart.
      */
     public String createOrder(String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
@@ -153,7 +150,7 @@ public class SeelClient {
     }
 
     /**
-     * Backfill historical orders (at least 30 days, at merchant onboarding).
+     * Backfill order history at onboarding - at least 30 days.
      */
     public String createOrdersBatch(String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
@@ -169,9 +166,9 @@ public class SeelClient {
     }
 
     /**
-     * Cancel a synced order; any WFP coverage on it cancels automatically.
-     * Refunding the WFP fee + tax to the shopper is the platform's job (see
-     * "Cancellation" in the README integration flow).
+     * Cancel a synced order; its WFP coverage cancels with it. Refunding the
+     * WFP fee and tax to the shopper is the platform's job - see
+     * Cancellation in the README.
      */
     public String cancelOrder(String orderId)
             throws SeelApiException, IOException, InterruptedException {
@@ -235,8 +232,8 @@ public class SeelClient {
      * seconds, dedupe on the payload's id + type (retries reuse the same
      * outer id).
      *
-     * <p>Uses MessageDigest.isEqual for a constant-time comparison. The
-     * webhookSecret must be non-empty; the JCE rejects empty HMAC keys.
+     * <p>MessageDigest.isEqual compares in constant time. Pass a non-empty
+     * webhookSecret; the JCE rejects empty HMAC keys.
      */
     public static boolean verifyWebhookSignature(byte[] body, String signatureB64,
                                                  String webhookSecret) {
@@ -246,22 +243,21 @@ public class SeelClient {
             byte[] expected = Base64.getEncoder().encode(mac.doFinal(body));
             return MessageDigest.isEqual(expected, signatureB64.getBytes(StandardCharsets.UTF_8));
         } catch (GeneralSecurityException e) {
-            // HmacSHA256 is guaranteed on every conforming JVM, so this is
-            // unreachable in practice.
+            // Every conforming JVM ships HmacSHA256, so this is unreachable.
             throw new IllegalStateException("HmacSHA256 unavailable", e);
         }
     }
 }
 
 /**
- * Thrown on any non-2xx response. Carries the HTTP status and Seel's raw
- * JSON error body, which includes the actionable message (e.g. which
- * required field is missing) and a trace_id to quote in support requests.
- * Parse the body with your JSON library if you need the individual fields.
+ * Thrown on any non-2xx response. Carries the status and Seel's raw JSON
+ * error body: the message names the offending field, and the trace_id is
+ * what Seel support will ask for. Parse the body with your JSON library
+ * for the individual fields.
  *
- * <p>Package-private top-level class so that a plain
+ * <p>Package-private top-level class so a plain
  * {@code javac SeelClient.java ExampleServer.java} works with no package
- * declaration; move it to its own file if you adopt a package structure.
+ * declaration; give it its own file if you adopt packages.
  */
 class SeelApiException extends Exception {
 

@@ -1,22 +1,20 @@
-//! Reference Rust client for Seel's ecommerce partner APIs (direct path).
+//! Rust client for Seel's ecommerce APIs (the direct-integration path).
 //!
-//! Wraps the public /v1/ecommerce/* APIs documented at
-//! <https://developer.seel.com> - specifically the flow in the SaaS Platform
-//! Integration Quickstart
+//! Wraps the public /v1/ecommerce/* APIs and follows the flow in the SaaS
+//! Platform Integration Quickstart
 //! (<https://developer.seel.com/docs/platform-direct-integration>):
 //!
 //! ```text
 //! merchant enables program -> create_merchant (+ batch order-history backfill)
 //! checkout                 -> create_quote (widget renders from the response)
-//! order placed             -> create_order (ALL orders, opted-in or not;
+//! order placed             -> create_order (all orders, opted in or not;
 //!                             seel_services carries quote_id + price on opt-in)
 //! order shipped/delivered  -> create_fulfillment / update_fulfillment
 //! order changed/cancelled  -> update_order / cancel_order
 //! async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
 //! ```
 //!
-//! Blocking style with a handful of small crates, no async runtime -
-//! intended to be readable enough to port to any stack.
+//! Blocking, a few small crates, no async runtime. Written to be ported.
 
 use std::fmt;
 use std::time::Duration;
@@ -28,17 +26,16 @@ use sha2::Sha256;
 
 pub const SANDBOX_BASE_URL: &str = "https://api-test.seel.com";
 pub const PRODUCTION_BASE_URL: &str = "https://api.seel.com";
-/// Single source of truth for the pinned API version.
+/// The pinned API version; all four language ports match.
 pub const API_VERSION: &str = "2.6.0";
 
-/// Returned on any non-2xx response. Carries the HTTP status and Seel's
-/// JSON error body, which includes the actionable message (e.g. which
-/// required field is missing) and a trace_id to quote in support requests.
+/// Returned on any non-2xx response. Carries the status and Seel's JSON
+/// error body: the message names the offending field, and the trace_id is
+/// what Seel support will ask for.
 #[derive(Debug)]
 pub struct SeelApiError {
     pub status: u16,
-    /// Seel's JSON error body, or a plain JSON string if the body was not
-    /// valid JSON.
+    /// Seel's JSON error body, or the raw text if it wasn't valid JSON.
     pub body: Value,
 }
 
@@ -140,30 +137,30 @@ impl SeelClient {
 
     // -- Merchants ----------------------------------------------------------
 
-    /// Onboard one retailer. Called once per retailer when they enable
-    /// the program (all grouped under your platform organization on Seel's
-    /// side). Follow with create_orders_batch for at least 30 days of order
+    /// Onboard one retailer. Call it when they enable the program;
+    /// retailers group under your platform organization on Seel's side.
+    /// Follow with create_orders_batch and at least 30 days of order
     /// history so Seel can run risk analysis.
     pub fn create_merchant(&self, payload: &Value) -> Result<Value, SeelError> {
         self.request("POST", "/ecommerce/merchants", Some(payload))
     }
 
-    /// Toggle/disable the program for a retailer (include the reason
-    /// when disabling), or sync changed protection settings.
+    /// Sync changed protection settings, or disable the program for a
+    /// retailer - include the reason when disabling.
     pub fn update_merchant(&self, merchant_id: &str, payload: &Value) -> Result<Value, SeelError> {
         self.request("POST", &format!("/ecommerce/merchants/{merchant_id}"), Some(payload))
     }
 
     // -- Quotes -------------------------------------------------------------
 
-    /// Quote a cart at checkout. The response (price, display_amounts,
-    /// widget_copy, extra_info) carries all the copy the storefront widget
-    /// renders. Re-quote on cart changes: address change, discount applied,
+    /// Quote a cart at checkout. The response carries everything the
+    /// storefront widget renders: price, display_amounts, widget_copy,
+    /// extra_info. Re-quote whenever the cart changes - address, discount,
     /// item removed.
     ///
-    /// See the README "Required fields and validation rules" section and
-    /// <https://developer.seel.com/reference/createquote> for the full
-    /// required-field list, including the constraint
+    /// The README's validation section and
+    /// <https://developer.seel.com/reference/createquote> list the required
+    /// fields, including
     /// price + sales_tax - allocated_discounts == final_price.
     pub fn create_quote(&self, payload: &Value) -> Result<Value, SeelError> {
         self.request("POST", "/ecommerce/quotes", Some(payload))
@@ -175,17 +172,15 @@ impl SeelClient {
 
     // -- Orders -------------------------------------------------------------
 
-    /// Sync every new order, whether or not the shopper opted in. When
-    /// they did, include the seel_services object with the quote_id and
-    /// price from the latest quote - this is what mints the contract and
-    /// triggers the contract.created webhook. Line items must match the
-    /// quoted cart.
+    /// Sync every new order, opted in or not. On opt-in, include the
+    /// seel_services object with the quote_id and price from the latest
+    /// quote - that mints the contract and fires the contract.created
+    /// webhook. Line items must match the quoted cart.
     pub fn create_order(&self, payload: &Value) -> Result<Value, SeelError> {
         self.request("POST", "/ecommerce/orders", Some(payload))
     }
 
-    /// Backfill historical orders (at least 30 days, at merchant
-    /// onboarding).
+    /// Backfill order history at onboarding - at least 30 days.
     pub fn create_orders_batch(&self, payload: &Value) -> Result<Value, SeelError> {
         self.request("POST", "/ecommerce/orders/batch", Some(payload))
     }
@@ -195,9 +190,9 @@ impl SeelClient {
         self.request("POST", &format!("/ecommerce/orders/{order_id}"), Some(payload))
     }
 
-    /// Cancel a synced order; any WFP coverage on it cancels
-    /// automatically. Refunding the WFP fee + tax to the shopper is the
-    /// platform's job (see "Cancellation" in the README integration flow).
+    /// Cancel a synced order; its WFP coverage cancels with it.
+    /// Refunding the WFP fee and tax to the shopper is the platform's job -
+    /// see Cancellation in the README.
     pub fn cancel_order(&self, order_id: &str) -> Result<Value, SeelError> {
         self.request("POST", &format!("/ecommerce/orders/{order_id}/cancel"), None)
     }
@@ -257,8 +252,8 @@ impl SeelClient {
 /// Webhook delivery is at-least-once: ACK with HTTP 200 within 10 seconds,
 /// dedupe on the payload's id + type (retries reuse the same outer id).
 ///
-/// The comparison is constant-time (via the hmac crate's verify_slice); a
-/// signature that fails to Base64-decode is simply invalid.
+/// The comparison is constant-time (the hmac crate's verify_slice); a
+/// signature that fails to Base64-decode is invalid.
 pub fn verify_webhook_signature(body: &[u8], signature_b64: &str, webhook_secret: &str) -> bool {
     let decoded = match BASE64_STANDARD.decode(signature_b64) {
         Ok(d) => d,

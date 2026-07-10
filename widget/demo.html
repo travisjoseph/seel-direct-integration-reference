@@ -27,10 +27,10 @@
 
   <script src="seel-widget.js"></script>
   <script>
-    // Offline demo: the mock fetcher below returns a canned Seel quote
-    // response, so this page works with no server and no credentials.
+    // Offline demo: the mock fetcher below returns a canned quote response,
+    // so this page needs no server and no credentials.
     //
-    // To run against a live sandbox instead, both steps are required:
+    // To run against a live sandbox instead, two steps:
     //   1. run one of the ../server/ example servers with SEEL_API_KEY set
     //      (e.g. python3 ../server/python/example_server.py)
     //   2. replace the configure({ quoteFetcher }) call below with
@@ -63,9 +63,9 @@
       }
     };
 
-    // Program-specific values, provided by Seel during onboarding. If the
-    // quote proxy sets SEEL_MERCHANT_ID / SEEL_QUOTE_TYPE, these are
-    // injected server-side and can be omitted from storefront code entirely.
+    // Program values from Seel onboarding. If the proxy sets
+    // SEEL_MERCHANT_ID / SEEL_QUOTE_TYPE, it injects them server-side and
+    // storefront code can drop them entirely.
     const SEEL_PROGRAM = {
       merchantId: "YOUR_SEEL_MERCHANT_ID",
       quoteType: "YOUR_PROGRAM_QUOTE_TYPE", // e.g. "acme-wfp"
@@ -91,13 +91,14 @@
       document.getElementById("total").textContent = "$120.00";
     });
 
-    // The Quote API requires these line-item fields: allocated_discounts,
-    // sales_tax, retail_price, image_urls, category_1..4, shipping_origin
-    // (with state + country), plus shipping_address.state. It also enforces
+    // The Quote API requires more fields than you might expect:
+    // allocated_discounts, sales_tax, retail_price, image_urls,
+    // category_1..4, shipping_origin (with state + country), and
+    // shipping_address.state. It also enforces
     // price + sales_tax - allocated_discounts === final_price.
-    // Each program has its own quote type; requests with any other type are
-    // rejected with an error listing the allowed types.
-    // Full field reference: https://developer.seel.com/reference/createquote
+    // Each program has its own quote type; the API rejects any other with
+    // an error naming the allowed ones.
+    // Full reference: https://developer.seel.com/reference/createquote
     createQuote({
       cart_id: "cart_demo_001",
       merchant_id: SEEL_PROGRAM.merchantId,

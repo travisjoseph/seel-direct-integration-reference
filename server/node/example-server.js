@@ -1,5 +1,5 @@
 /**
- * Example backend for the direct-integration path. Node standard library only.
+ * Example backend for the direct-integration path. Node stdlib only.
  *
  * Two routes:
  *   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
@@ -12,8 +12,8 @@
  * Run:
  *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... node example-server.js
  *
- * To drive the widget demo against a live sandbox, both steps are required
- * (this server does not serve the demo page itself):
+ * To drive the widget demo against a live sandbox, two steps - this server
+ * doesn't serve the demo page:
  *   1. run this server
  *   2. in widget/demo.html, replace the mock quoteFetcher with
  *      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
@@ -34,9 +34,8 @@ const PORT = parseInt(process.env.PORT || "8787", 10);
 const API_KEY = process.env.SEEL_API_KEY || "";
 const WEBHOOK_SECRET = process.env.SEEL_WEBHOOK_SECRET || "";
 const BASE_URL = process.env.SEEL_BASE_URL || SANDBOX_BASE_URL;
-// Program-specific values, provided by Seel during onboarding. When set, the
-// quote proxy injects them server-side so storefront code carries no
-// program-specific values and stays identical across programs.
+// Program values from Seel onboarding. When set, the proxy stamps them into
+// every quote request, so storefront code stays identical across programs.
 const MERCHANT_ID = process.env.SEEL_MERCHANT_ID || "";
 const QUOTE_TYPE = process.env.SEEL_QUOTE_TYPE || "";
 
@@ -99,8 +98,8 @@ async function handleRequest(req, res) {
       respond(res, 200, await client.createQuote(params));
     } catch (exc) {
       if (exc instanceof SeelAPIError) {
-        // Forward Seel's status + error body: it names the missing or
-        // inconsistent field, which is what the integrator needs.
+        // Forward Seel's status and error body - it names the offending
+        // field.
         const errBody =
           exc.body !== null && typeof exc.body === "object"
             ? exc.body

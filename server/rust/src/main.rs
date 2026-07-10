@@ -15,8 +15,8 @@
 //! SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... cargo run
 //! ```
 //!
-//! To drive the widget demo against a live sandbox, both steps are required
-//! (this server does not serve the demo page itself):
+//! To drive the widget demo against a live sandbox, two steps - this server
+//! doesn't serve the demo page:
 //! 1. run this server
 //! 2. in widget/demo.html, replace the mock quoteFetcher with
 //!    configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
@@ -31,9 +31,9 @@ use tiny_http::{Header, Method, Request, Response, Server};
 struct Config {
     client: SeelClient,
     webhook_secret: String,
-    // Program-specific values, provided by Seel during onboarding. When set,
-    // the quote proxy injects them server-side so storefront code carries no
-    // program-specific values and stays identical across programs.
+    // Program values from Seel onboarding. When set, the proxy stamps them
+    // into every quote request, so storefront code stays identical across
+    // programs.
     merchant_id: String,
     quote_type: String,
 }
@@ -117,8 +117,8 @@ fn handle_quote(mut request: Request, config: &Config) {
     match config.client.create_quote(&params) {
         Ok(resp) => respond_json(request, 200, &resp),
         Err(SeelError::Api(err)) => {
-            // Forward Seel's status + error body: it names the missing or
-            // inconsistent field, which is what the integrator needs.
+            // Forward Seel's status and error body - it names the
+            // offending field.
             let body = if err.body.is_object() {
                 err.body.clone()
             } else {
@@ -131,7 +131,7 @@ fn handle_quote(mut request: Request, config: &Config) {
 }
 
 fn handle_webhook(mut request: Request, config: &Config) {
-    // An unreadable body cannot be verified, so it is treated as unsigned.
+    // An unreadable body can't be verified, so treat it as unsigned.
     let raw = match read_body(&mut request) {
         Some(b) => b,
         None => {

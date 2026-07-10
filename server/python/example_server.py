@@ -11,8 +11,8 @@ Two routes:
 Run:
   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... python3 example_server.py
 
-To drive the widget demo against a live sandbox, both steps are required
-(this server does not serve the demo page itself):
+To drive the widget demo against a live sandbox, two steps - this server
+doesn't serve the demo page:
   1. run this server
   2. in widget/demo.html, replace the mock quoteFetcher with
      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
@@ -28,9 +28,8 @@ PORT = int(os.environ.get("PORT", "8787"))
 API_KEY = os.environ.get("SEEL_API_KEY", "")
 WEBHOOK_SECRET = os.environ.get("SEEL_WEBHOOK_SECRET", "")
 BASE_URL = os.environ.get("SEEL_BASE_URL", SANDBOX_BASE_URL)
-# Program-specific values, provided by Seel during onboarding. When set, the
-# quote proxy injects them server-side so storefront code carries no
-# program-specific values and stays identical across programs.
+# Program values from Seel onboarding. When set, the proxy stamps them into
+# every quote request, so storefront code stays identical across programs.
 MERCHANT_ID = os.environ.get("SEEL_MERCHANT_ID", "")
 QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
 
@@ -85,8 +84,8 @@ class Handler(BaseHTTPRequestHandler):
             try:
                 self._respond(200, client.create_quote(params))
             except SeelAPIError as exc:
-                # Forward Seel's status + error body: it names the missing or
-                # inconsistent field, which is what the integrator needs.
+                # Forward Seel's status and error body - it names the
+                # offending field.
                 self._respond(exc.status, exc.body if isinstance(exc.body, dict) else {"error": str(exc)})
             except Exception:
                 self._respond(502, {"error": "upstream quote request failed"})
