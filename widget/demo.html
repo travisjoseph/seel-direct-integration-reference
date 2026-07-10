@@ -1,0 +1,144 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Seel Widget SDK demo</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; max-width: 560px; margin: 40px auto; padding: 0 16px; }
+    .cart { border: 1px solid #eee; border-radius: 8px; padding: 16px; margin-bottom: 16px; }
+    .row { display: flex; justify-content: space-between; margin: 4px 0; }
+    #log { font-family: monospace; font-size: 12px; background: #f6f6f6; padding: 8px; border-radius: 6px; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h2>Retailer checkout (demo)</h2>
+  <div class="cart">
+    <div class="row"><span>Premium Wireless Headphones</span><span>$120.00</span></div>
+    <div class="row" id="seel-line" style="display:none"><span>Worry-Free Delivery</span><span id="seel-price"></span></div>
+    <div class="row"><strong>Total</strong><strong id="total">$120.00</strong></div>
+  </div>
+
+  <!-- Seel widget mounting point -->
+  <div id="seel-wfp-widget-root"></div>
+
+  <h3>Event log</h3>
+  <div id="log"></div>
+
+  <script src="seel-widget.js"></script>
+  <script>
+    // Offline demo: the mock fetcher below returns a canned Seel quote
+    // response, so this page works with no server and no credentials.
+    //
+    // To run against a live sandbox instead, both steps are required:
+    //   1. run ../server/example_server.py (with SEEL_API_KEY set)
+    //   2. replace the configure({ quoteFetcher }) call below with
+    //      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+    const MOCK_QUOTE = {
+      quote_id: "demo_quote_001",
+      status: "accepted",
+      price: "2.99",
+      currency_code: "USD",
+      currency_symbol: "$",
+      display_amounts: { price: "$2.99 USD" },
+      eligible_items: [{ product_id: "prod_001", variant_id: "variant_001", coverages: [{ coverage_type: "gdd" }] }],
+      extra_info: {
+        display_widget_text: ["Get a full refund if the order doesn't arrive as described, plus extended returns"],
+        opt_out_warning_text: "No protection: lost or damaged packages may not be covered",
+        coverage_details_text: ["Lost in-transit", "Damaged in transit", "Stolen after delivery", "Significantly delayed"],
+        terms_url: "https://www.seel.com/terms/worry-free-purchase",
+        privacy_policy_url: "https://www.seel.com/privacy",
+        is_widget_hidden: false,
+        widget_title: "Worry-Free Delivery®"
+      },
+      widget_copy: {
+        widget_title: "Worry-Free Delivery®",
+        widget_text: ["Get a full refund if the order doesn't arrive as described, plus extended returns"],
+        modal_details_text: [
+          { category: "Not Delivered", description: "The package was lost or never arrived" },
+          { category: "Damaged", description: "The item arrived damaged in transit" },
+          { category: "Significantly Delayed", description: "Shipment delayed beyond the promised date" }
+        ]
+      }
+    };
+
+    // Program-specific values, provided by Seel during onboarding. If the
+    // quote proxy sets SEEL_MERCHANT_ID / SEEL_QUOTE_TYPE, these are
+    // injected server-side and can be omitted from storefront code entirely.
+    const SEEL_PROGRAM = {
+      merchantId: "YOUR_SEEL_MERCHANT_ID",
+      quoteType: "YOUR_PROGRAM_QUOTE_TYPE", // e.g. "acme-wfp"
+    };
+
+    const logEl = document.getElementById("log");
+    function log(msg) { logEl.textContent += msg + "\n"; }
+
+    const { configure, createQuote, onCheck, onUncheck } = window.SeelSDK;
+
+    configure({ quoteFetcher: async () => MOCK_QUOTE });
+
+    onCheck((q) => {
+      log("onCheck  -> add line item, price " + q.displayPrice);
+      document.getElementById("seel-line").style.display = "flex";
+      document.getElementById("seel-price").textContent = q.displayPrice;
+      document.getElementById("total").textContent = "$" + (120 + parseFloat(q.price)).toFixed(2);
+    });
+
+    onUncheck((q) => {
+      log("onUncheck -> remove line item");
+      document.getElementById("seel-line").style.display = "none";
+      document.getElementById("total").textContent = "$120.00";
+    });
+
+    // The Quote API requires these line-item fields: allocated_discounts,
+    // sales_tax, retail_price, image_urls, category_1..4, shipping_origin
+    // (with state + country), plus shipping_address.state. It also enforces
+    // price + sales_tax - allocated_discounts === final_price.
+    // Each program has its own quote type; requests with any other type are
+    // rejected with an error listing the allowed types.
+    // Full field reference: https://developer.seel.com/reference/createquote
+    createQuote({
+      cart_id: "cart_demo_001",
+      merchant_id: SEEL_PROGRAM.merchantId,
+      session_id: "session_demo_001",
+      device_category: "desktop",
+      device_platform: "Web",
+      device_id: "device_demo_001",
+      client_ip: "203.0.113.10", // the shopper's IP, captured server-side
+      type: SEEL_PROGRAM.quoteType,
+      is_default_on: true,
+      line_items: [{
+        line_item_id: "line_001",
+        product_id: "prod_001",
+        product_title: "Premium Wireless Headphones",
+        product_description: "Noise-cancelling over-ear wireless headphones.",
+        variant_id: "variant_001",
+        variant_title: "Black",
+        sku: "sku_001",
+        brand_name: "AudioPro",
+        seller_id: "seller_001",
+        seller_name: "AudioPro Official Store",
+        quantity: 1,
+        price: 120.0,
+        allocated_discounts: 0.0,
+        sales_tax: 0.0,
+        retail_price: 120.0,
+        final_price: 120.0,
+        currency: "USD",
+        requires_shipping: true,
+        is_final_sale: false,
+        condition: "new",
+        product_url: "https://example.com/product/headphones",
+        image_urls: ["https://example.com/images/headphones.jpg"],
+        category_1: "Electronics",
+        category_2: "Audio",
+        category_3: "Headphones",
+        category_4: "Over-Ear",
+        shipping_origin: { address_1: "456 Market St", city: "San Francisco", state: "CA", zipcode: "94103", country: "US" }
+      }],
+      shipping_address: { address_1: "123 Main St", city: "San Francisco", state: "CA", zipcode: "94105", country: "US" },
+      customer: { customer_id: "cus_demo", first_name: "Demo", last_name: "Shopper", email: "demo@example.com" }
+    }, (q) => log("createQuote -> status=" + q.status + " quoteId=" + q.quoteId));
+  </script>
+</body>
+</html>
