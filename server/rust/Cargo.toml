@@ -1,0 +1,17 @@
+[package]
+name = "seel-direct-sdk"
+version = "0.1.0"
+edition = "2021"
+description = "Reference Rust client and example backend for Seel's ecommerce partner APIs (direct path)"
+publish = false
+
+[dependencies]
+# Blocking HTTP client for the outbound Seel API calls.
+ureq = { version = "2.12", features = ["json"] }
+# Minimal blocking HTTP server for the example backend.
+tiny_http = "0.12"
+serde_json = "1.0"
+# HMAC-SHA256 webhook signature verification.
+hmac = "0.12"
+sha2 = "0.10"
+base64 = "0.22"

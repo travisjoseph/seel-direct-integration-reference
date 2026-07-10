@@ -2,3 +2,7 @@
 __pycache__/
 *.pyc
 .DS_Store
+*.class
+server/rust/target/
+server/rust/Cargo.lock
+node_modules/

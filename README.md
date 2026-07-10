@@ -26,16 +26,21 @@ widget/
                     API response (price, widget_copy, terms).
   demo.html         Offline demo with a mocked quote. Open directly in a browser.
 
-server/
-  seel_client.py    Python reference client for the /v1/ecommerce/* APIs:
-                    merchants, quotes, orders (create/update/cancel/batch),
-                    fulfillments, contracts/claims lookups, webhook HMAC verify.
-                    Stdlib only - written to be easy to port to any stack.
-  example_server.py Minimal backend showing the two server-side pieces:
-                    a browser quote proxy (keeps the API key server-side and
-                    injects program-specific values) and a single webhook
-                    endpoint (contract.* + claim.*).
+server/             Reference backends in four languages - pick yours. Each
+                    implements the same two pieces: an API client for the
+                    /v1/ecommerce/* endpoints (merchants, quotes, orders,
+                    fulfillments, contracts/claims lookups, webhook HMAC
+                    verify) and an example server (browser quote proxy that
+                    keeps the API key server-side and injects program values,
+                    plus an HMAC-verified webhook endpoint).
+  python/           Stdlib only.        python3 example_server.py
+  node/             Node 18+ built-ins. node example-server.js
+  rust/             Small crate.        cargo run
+  java/             JDK 17+ only.       javac *.java && java ExampleServer
 ```
+
+The Python version is the primary reference: it carries the fullest
+commentary, and the other languages are faithful ports of it.
 
 ## Program configuration
 
@@ -92,7 +97,7 @@ Against sandbox (both steps required - the example server does not serve the
 demo page):
 
 ```bash
-cd server
+cd server/python   # or server/node, server/rust, server/java
 SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... SEEL_MERCHANT_ID=... SEEL_QUOTE_TYPE=... python3 example_server.py
 # then, in widget/demo.html, replace the mock quoteFetcher with
 #   configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
@@ -108,11 +113,11 @@ Keep credentials in environment variables and never commit them.
 | Production | `https://api.seel.com` |
 
 Auth: `X-Seel-Api-Key` on every request, plus `X-Seel-Api-Version`. The
-pinned version lives in `API_VERSION` in `server/seel_client.py` (single
-source of truth in this package); see
-[developer.seel.com](https://developer.seel.com/reference/introduction) for
-the latest. The API key is a server-side secret - browser code must go
-through a backend proxy (see `example_server.py`).
+pinned version is the `API_VERSION` constant in each client (kept identical
+across languages; `server/python/seel_client.py` is the primary reference);
+see [developer.seel.com](https://developer.seel.com/reference/introduction)
+for the latest. The API key is a server-side secret - browser code must go
+through a backend proxy (see the example server in your language).
 
 ## Required fields and validation rules
 
@@ -134,9 +139,9 @@ The Quote API enforces the following beyond the documented basics
   integration contact; US/USD payloads work for end-to-end sandbox testing.
 
 API errors return a JSON body with an actionable `error` message and a
-`trace_id` - `seel_client.py` surfaces both via `SeelAPIError`, and the
-example quote proxy forwards them to the browser. Quote the `trace_id` when
-raising an issue with Seel.
+`trace_id` - every client surfaces both via its API error type
+(`SeelAPIError` and equivalents), and the example quote proxy forwards them
+to the browser. Quote the `trace_id` when raising an issue with Seel.
 
 ## Design constraints
 

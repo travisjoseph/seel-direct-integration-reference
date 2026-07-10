@@ -12,7 +12,8 @@
  *
  * The Seel API key must never reach the browser. createQuote() POSTs the
  * quote params to a backend proxy (config.quoteEndpoint) which attaches the
- * key and forwards to Seel. See ../server/example_server.py.
+ * key and forwards to Seel. Reference proxies in ../server/ (Python, Node,
+ * Rust, Java).
  *
  * Callback semantics: onCheck/onUncheck fire only when the opt-in state
  * changes (user toggles, default-on first render, coverage becoming

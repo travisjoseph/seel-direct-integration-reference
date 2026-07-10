@@ -31,7 +31,8 @@
     // response, so this page works with no server and no credentials.
     //
     // To run against a live sandbox instead, both steps are required:
-    //   1. run ../server/example_server.py (with SEEL_API_KEY set)
+    //   1. run one of the ../server/ example servers with SEEL_API_KEY set
+    //      (e.g. python3 ../server/python/example_server.py)
     //   2. replace the configure({ quoteFetcher }) call below with
     //      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
     const MOCK_QUOTE = {
