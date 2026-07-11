@@ -1,4 +1,4 @@
-# Seel Direct-Integration SDK
+# Seel Direct Integration - Reference Implementation
 
 A reference implementation of Seel's direct ("ecommerce") integration, for
 SaaS platforms whose retailers offer Worry-Free Purchase through an API

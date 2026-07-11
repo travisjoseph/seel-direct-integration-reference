@@ -24,7 +24,7 @@
 use std::sync::Arc;
 use std::thread;
 
-use seel_direct_sdk::{verify_webhook_signature, SeelClient, SeelError, SANDBOX_BASE_URL};
+use seel_direct_integration_reference::{verify_webhook_signature, SeelClient, SeelError, SANDBOX_BASE_URL};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 

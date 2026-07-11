@@ -1,5 +1,5 @@
 [package]
-name = "seel-direct-sdk"
+name = "seel-direct-integration-reference"
 version = "0.1.0"
 edition = "2021"
 description = "Reference Rust client and example backend for Seel's ecommerce partner APIs (direct path)"
