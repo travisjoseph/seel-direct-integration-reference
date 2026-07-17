@@ -69,7 +69,16 @@ program and every retailer; only the backend environment differs.
 5. **Cancellation** - `cancel_order()`; coverage cancels with it. On the
    `contract.cancelled` webhook, refund the WFP fee and its tax to the
    shopper if that hasn't happened yet.
-6. **Webhooks** - one endpoint. Check the `X-Seel-Hmac-SHA256` signature,
+6. **Claims** - when a shopper files in the platform's returns flow,
+   `create_claim()` registers it with Seel. Delivery-issue claims carry
+   `claim_type` loss/damage/theft/delay with photo or document attachments;
+   return-shipping claims carry `claim_type` return_shipping with the RMA
+   number, return tracking, and label cost. Who decides the outcome is set
+   per program: either the platform adjudicates and submits its decision
+   via `update_claim()` (accept/reject, with a reject-reason code and
+   shopper-facing details on rejections), or Seel adjudicates. Either way
+   Seel fires `claim.accepted` or `claim.rejected`.
+7. **Webhooks** - one endpoint. Check the `X-Seel-Hmac-SHA256` signature,
    answer 200 within 10 seconds, and dedupe on the payload's `id` + `type` -
    delivery is at-least-once.
 
