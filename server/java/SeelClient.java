@@ -11,6 +11,8 @@
  *                               seel_services carries quote_id + price on opt-in)
  *   order shipped/delivered  -> createFulfillment / updateFulfillment
  *   order changed/cancelled  -> updateOrder / cancelOrder
+ *   return or claim filed    -> createClaim (+ updateClaim with the decision
+ *                               when the platform adjudicates)
  *   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
  *
  * JDK 17+ standard library only, no dependencies.
@@ -192,6 +194,38 @@ public class SeelClient {
             throws SeelApiException, IOException, InterruptedException {
         return request("POST",
                 "/ecommerce/orders/" + orderId + "/fulfillments/" + fulfillmentId, payloadJson);
+    }
+
+    // -- Claims ----------------------------------------------------------------
+
+    /**
+     * Register a claim when the shopper files in the platform's returns
+     * flow. Delivery-issue claims carry claim_type loss | damage | theft |
+     * delay plus claim_details with attachments; return-shipping claims
+     * carry claim_type return_shipping plus the RMA number, the return
+     * shipment (carrier, tracking, label cost), and the return addresses. Seel opens the claim as pending and fires
+     * the claim.created webhook.
+     */
+    public String createClaim(String payloadJson)
+            throws SeelApiException, IOException, InterruptedException {
+        return request("POST", "/ecommerce/claims", payloadJson);
+    }
+
+    /**
+     * Submit the adjudication decision on programs where the platform
+     * adjudicates: decision accept | reject, with a reject_reason code and
+     * shopper-facing details on rejections. Claim items and amounts cannot
+     * be changed after creation. Seel records the outcome and fires
+     * claim.accepted or claim.rejected.
+     */
+    public String updateClaim(String claimId, String payloadJson)
+            throws SeelApiException, IOException, InterruptedException {
+        return request("POST", "/ecommerce/claims/" + claimId, payloadJson);
+    }
+
+    public String getClaim(String claimId)
+            throws SeelApiException, IOException, InterruptedException {
+        return request("GET", "/ecommerce/claims/" + claimId, null);
     }
 
     // -- Lookups (ad hoc; day-to-day state comes via webhooks) -----------------

@@ -11,6 +11,8 @@
 //!                             seel_services carries quote_id + price on opt-in)
 //! order shipped/delivered  -> create_fulfillment / update_fulfillment
 //! order changed/cancelled  -> update_order / cancel_order
+//! return or claim filed    -> create_claim (+ update_claim with the decision
+//!                             when the platform adjudicates)
 //! async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
 //! ```
 //!
@@ -220,6 +222,31 @@ impl SeelClient {
             &format!("/ecommerce/orders/{order_id}/fulfillments/{fulfillment_id}"),
             Some(payload),
         )
+    }
+
+    // -- Claims -------------------------------------------------------------
+
+    /// Register a claim when the shopper files in the platform's returns
+    /// flow. Delivery-issue claims carry claim_type loss | damage | theft |
+    /// delay plus claim_details with attachments; return-shipping claims
+    /// carry claim_type return_shipping plus the RMA number, the return
+    /// shipment (carrier, tracking, label cost), and the return addresses. Seel opens the claim as pending and fires
+    /// the claim.created webhook.
+    pub fn create_claim(&self, payload: &Value) -> Result<Value, SeelError> {
+        self.request("POST", "/ecommerce/claims", Some(payload))
+    }
+
+    /// Submit the adjudication decision on programs where the platform
+    /// adjudicates: decision accept | reject, with a reject_reason code and
+    /// shopper-facing details on rejections. Claim items and amounts cannot
+    /// be changed after creation. Seel records the outcome and fires
+    /// claim.accepted or claim.rejected.
+    pub fn update_claim(&self, claim_id: &str, payload: &Value) -> Result<Value, SeelError> {
+        self.request("POST", &format!("/ecommerce/claims/{claim_id}"), Some(payload))
+    }
+
+    pub fn get_claim(&self, claim_id: &str) -> Result<Value, SeelError> {
+        self.request("GET", &format!("/ecommerce/claims/{claim_id}"), None)
     }
 
     // -- Lookups (ad hoc; day-to-day state comes via webhooks) ---------------
