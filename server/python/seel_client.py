@@ -142,14 +142,14 @@ class SeelClient:
             "POST", f"/ecommerce/orders/{order_id}/fulfillments/{fulfillment_id}", payload
         )
 
-    # -- Claims ---------------------------------------------------------------
+    # -- Claims -------------------------------------------------------------
 
     def create_claim(self, payload: dict) -> dict:
         """Register a claim when the shopper files in the platform's returns
         flow. Delivery-issue claims carry claim_type loss | damage | theft |
         delay plus claim_details with attachments; return-shipping claims
-        carry claim_type return_shipping plus the RMA number, return shipment
-        tracking, and label cost. Seel opens the claim as pending and fires
+        carry claim_type return_shipping plus the RMA number, the return
+        shipment (carrier, tracking, label cost), and the return addresses. Seel opens the claim as pending and fires
         the claim.created webhook."""
         return self._request("POST", "/ecommerce/claims", payload)
 

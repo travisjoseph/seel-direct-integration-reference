@@ -71,11 +71,12 @@ program and every retailer; only the backend environment differs.
    shopper if that hasn't happened yet.
 6. **Claims** - when a shopper files in the platform's returns flow,
    `create_claim()` registers it with Seel. Delivery-issue claims carry
-   `claim_type` loss/damage/theft/delay with photo or document attachments;
-   return-shipping claims carry `claim_type` return_shipping with the RMA
-   number, return tracking, and label cost. Who decides the outcome is set
+   `claim_type` loss | damage | theft | delay with `claim_details` and
+   their attachments; return-shipping claims carry `claim_type`
+   return_shipping with the RMA number, the return shipment (carrier,
+   tracking, label cost), and the return addresses. Who decides the outcome is set
    per program: either the platform adjudicates and submits its decision
-   via `update_claim()` (accept/reject, with a reject-reason code and
+   via `update_claim()` (accept/reject, with a `reject_reason` code and
    shopper-facing details on rejections), or Seel adjudicates. Either way
    Seel fires `claim.accepted` or `claim.rejected`.
 7. **Webhooks** - one endpoint. Check the `X-Seel-Hmac-SHA256` signature,
