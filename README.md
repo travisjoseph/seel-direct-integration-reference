@@ -27,11 +27,15 @@ server/             The same backend in four languages - pick yours. Each
                     has a client for every /v1/ecommerce/* endpoint and an
                     example server: a quote proxy that keeps the API key off
                     the browser, order and fulfillment routes, and a webhook
-                    endpoint that checks HMAC signatures.
+                    endpoint that checks HMAC signatures. Payloads are
+                    validated before sending - see Validation rules.
   python/           Stdlib only.        python3 example_server.py
   node/             Node 18+ built-ins. node example-server.js
   rust/             Small crate.        cargo run
   java/             JDK 17+ only.       javac *.java && java ExampleServer
+                    Validation lives in SeelValidation.java here, not in the
+                    client - this port has no JSON parser to inspect a
+                    payload with.
 ```
 
 Python is the primary copy; the other three are ports of it.
@@ -183,25 +187,92 @@ proxy, never straight to Seel.
 
 ## Validation rules
 
-The Quote API enforces more than the schema at
-[developer.seel.com/reference/createquote](https://developer.seel.com/reference/createquote)
-makes obvious:
+Measured against sandbox on 2026-09-10 by removing one field per request
+from a known-good payload and recording the response, for Create Quote,
+Create Order and Create Merchant.
 
-- Each program has its own quote `type`, provided with your credentials.
-  Any other type is rejected with an error naming the allowed ones.
-- These line-item fields are required: `allocated_discounts`, `sales_tax`,
-  `retail_price`, `image_urls`, `category_1`..`category_4`, and
-  `shipping_origin` (with `state` and `country`). So is
-  `shipping_address.state`.
-- `price + sales_tax - allocated_discounts` must equal `final_price`.
-- Eligibility is configured per program and market. If a market you expect
-  comes back `rejected`, ask your Seel contact. US/USD payloads work end to
-  end in sandbox.
+**Requiredness is per-account.** Seel validates a strict default profile and
+relaxes individual fields for some accounts, so your account may accept less
+than this. The sets below are the strict profile: sending them is never
+wrong. That is also why the clients treat validation as advisory and let you
+switch it off.
+
+### Required on Create Quote and Create Order
+
+Top level, both calls: `merchant_id`, `session_id`, `device_category`,
+`device_platform`, `customer`, `shipping_address`, `line_items`.
+Quote also needs `type` and `is_default_on`; Order also needs `order_id`,
+`order_number` and `created_ts`.
+
+- `customer`: `customer_id`, `email`
+- `shipping_address`: `address_1`, `city`, `state`, `zipcode`, `country`
+- `line_items[]`: `line_item_id`, `product_id`, `product_title`, `quantity`,
+  `price`, `allocated_discounts`, `sales_tax`, `final_price`, `currency`,
+  `requires_shipping`, `image_urls`, `category_1`, `category_2`,
+  `is_final_sale`, `shipping_origin`
+- `line_items[].shipping_origin`: `country` only
+
+Confirmed optional, despite being easy to assume otherwise: `cart_id`,
+`device_id`, `client_ip`, `customer.first_name` / `last_name` / `phone`,
+`shipping_address.address_2`, and line-item `variant_id`, `sku`,
+`brand_name`, `retail_price`, `product_url`, `category_3`, `category_4`,
+`condition`, and every `shipping_origin` field except `country`.
+
+`price + sales_tax - allocated_discounts` must equal `final_price`.
+
+Each program has its own quote `type`, provided with your credentials. Any
+other type is rejected with an error naming the allowed ones. Eligibility is
+configured per program and market: if a market you expect comes back
+`rejected`, ask your Seel contact. US/USD payloads work end to end in
+sandbox.
+
+### Required on Create Merchant
+
+`shop_id`, `admin_domain`, `shop_domain`, `shop_platform`, `shop_currency`,
+`shop_name`, `contact_name`, `contact_email`, and `seel_services` with
+`type` on each entry.
+
+**Every `seel_services` entry also needs a `coverages` key.** Omitting it
+returns `500 system error`, not a validation error. An empty array is
+accepted, so `coverages: []` is enough to get past it, which is the tell
+that this is a server-side null-check rather than a data requirement. The
+clients check for it before sending so you get a readable error instead of
+a 500.
+
+### Three ways Create Order fails while returning 200
+
+A failed attach is reported as `contract_id: null` on an otherwise
+successful response. There is no error status code, so an integration can
+look healthy while covering nothing.
+
+| Mistake | What you get back |
+|---|---|
+| `quote_id` at the top level instead of inside `seel_services` | `200`, `seel_services: null`, no error |
+| `seel_services` sent as an object rather than an array | `500` from the JSON parser |
+| `seel_services` entry with no `price` | `200`, `contract_id: null`, `error: "system error"` nested in the entry |
+
+Two things Seel does **not** enforce, so you have to: the `price` you attach
+is never checked against the quoted premium, and the order's line items are
+not required to match the quoted cart. Both mint a contract regardless.
+
+### Turning validation off
+
+The Python, Node and Rust clients validate before sending and raise with
+every problem at once, then check the response of `create_order` for a real
+`contract_id`. Pass `validate=False` (Python), `validate: false` (Node) or
+call `.without_validation()` (Rust) if your account has fields relaxed, or
+if you would rather let the API be the only authority.
+
+The Java client works in raw JSON strings and has no parser, so it cannot do
+this automatically. Use `SeelValidation.validateQuote` / `validateOrder` /
+`validateMerchant`, which take the `Map` your JSON library produces - call
+them before you serialize.
+
+### Errors
 
 Errors come back as JSON with an `error` message and a `trace_id`. Each
-client surfaces both through its API error type, and the proxy forwards
-them to the browser. Include the `trace_id` when you raise an issue with
-Seel.
+client surfaces both through its API error type, and the proxy forwards them
+to the browser. Include the `trace_id` when you raise an issue with Seel.
 
 ## Notes
 

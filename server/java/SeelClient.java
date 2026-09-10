@@ -100,6 +100,10 @@ public class SeelClient {
      * group under your platform organization on Seel's side. Follow with
      * createOrdersBatch and at least 30 days of order history so Seel can
      * run risk analysis.
+     *
+     * <p>Each seel_services entry needs a coverages key. Omitting it returns
+     * a 500 rather than a validation error - see
+     * {@link SeelValidation#validateMerchant}.
      */
     public String createMerchant(String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
@@ -141,10 +145,22 @@ public class SeelClient {
     // -- Orders --------------------------------------------------------------
 
     /**
-     * Sync every new order, opted in or not. On opt-in, include the
-     * seel_services object with the quote_id and price from the latest
-     * quote - that mints the contract and fires the contract.created
-     * webhook. Line items must match the quoted cart.
+     * Sync every new order, opted in or not.
+     *
+     * <p>On opt-in, seel_services must be an ARRAY of entries carrying type,
+     * quote_id and price from the latest quote - that mints the contract and
+     * fires contract.created. Sending quote_id at the top level instead
+     * returns 200 with seel_services: null and no error, so check the
+     * response for a non-null contract_id rather than trusting the status
+     * code.
+     *
+     * <p>Seel does not check the attach against the quote: a price that does
+     * not match the quoted premium, or line items that differ from the
+     * quoted cart, both still mint a contract. Keeping them consistent is
+     * the caller's job.
+     *
+     * <p>See {@link SeelValidation#validateOrder} to catch these before
+     * sending.
      */
     public String createOrder(String payloadJson)
             throws SeelApiException, IOException, InterruptedException {

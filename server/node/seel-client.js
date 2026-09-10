@@ -44,12 +44,193 @@ class SeelAPIError extends Error {
   }
 }
 
+/**
+ * Raised before any request when a payload is missing fields Seel requires,
+ * or uses a shape the API accepts and then fails on. Carries the full list,
+ * so one call reports every problem instead of the API reporting them one
+ * 400 at a time.
+ */
+class SeelValidationError extends Error {
+  constructor(operation, problems) {
+    super(
+      `${operation}: ${problems.join("; ")}. ` +
+        "Pass validate: false to the client to skip these checks."
+    );
+    this.name = "SeelValidationError";
+    this.operation = operation;
+    this.problems = problems;
+  }
+}
+
+/**
+ * Raised when createOrder returns 200 but no contract was created.
+ *
+ * Seel reports a failed attach as contract_id: null on an otherwise
+ * successful response - there is no error status code. Without this check
+ * an integration looks healthy while covering nothing.
+ */
+class SeelContractNotMintedError extends Error {
+  constructor(response, detail) {
+    super(`order created but no contract was minted: ${detail}`);
+    this.name = "SeelContractNotMintedError";
+    this.response = response;
+  }
+}
+
+// Required-field sets, measured against sandbox on 2026-09-10 by removing
+// one field per request from a known-good payload and recording the
+// response.
+//
+// Requiredness is PER-ACCOUNT. Seel validates a strict default profile and
+// relaxes individual fields for some accounts, so an account may
+// legitimately accept less than this. These sets are the strict profile:
+// sending them is never wrong, but rejecting a payload locally could be.
+// That is why validation is advisory and validate: false turns it off.
+//
+// A "[]" suffix means the rule applies to every element of that array.
+const LINE_ITEM_REQUIRED = [
+  "line_item_id", "product_id", "product_title", "quantity", "price",
+  "allocated_discounts", "sales_tax", "final_price", "currency",
+  "requires_shipping", "image_urls", "category_1", "category_2",
+  "is_final_sale", "shipping_origin",
+];
+
+const QUOTE_REQUIRED = {
+  "": ["merchant_id", "session_id", "device_category", "device_platform", "type",
+       "is_default_on", "customer", "shipping_address", "line_items"],
+  "customer": ["customer_id", "email"],
+  "shipping_address": ["address_1", "city", "state", "zipcode", "country"],
+  "line_items[]": LINE_ITEM_REQUIRED,
+  "line_items[].shipping_origin": ["country"],
+};
+
+const ORDER_REQUIRED = {
+  "": ["merchant_id", "order_id", "order_number", "created_ts", "session_id",
+       "device_category", "device_platform", "customer", "shipping_address", "line_items"],
+  "customer": ["customer_id", "email"],
+  "shipping_address": ["address_1", "city", "state", "zipcode", "country"],
+  "line_items[]": LINE_ITEM_REQUIRED,
+  "line_items[].shipping_origin": ["country"],
+  // Only checked when seel_services is present - an order with no coverage
+  // is a normal sync, not an error.
+  "seel_services[]": ["type", "quote_id", "price"],
+};
+
+// coverages must be PRESENT but may be an empty array. Omitting it returns
+// a 500 rather than a validation error, so catching it locally is the whole
+// point of validating this call.
+const MERCHANT_REQUIRED = {
+  "": ["shop_id", "admin_domain", "shop_domain", "shop_platform", "shop_currency",
+       "shop_name", "contact_name", "contact_email", "seel_services"],
+  "seel_services[]": ["type", "coverages"],
+};
+
+/**
+ * Missing means the key is absent, null/undefined, or an empty string.
+ * false and 0 are real values - is_default_on, requires_shipping and
+ * allocated_discounts all legitimately take them. An empty array is a real
+ * value too: merchant coverages: [] is accepted.
+ */
+function isAbsent(value) {
+  return value === undefined || value === null || value === "";
+}
+
+/** Yield [node, dottedPrefix] pairs a scope selects. */
+function resolveScope(payload, scope) {
+  let nodes = [[payload, ""]];
+  if (!scope) return nodes;
+  for (const part of scope.split(".")) {
+    const fanOut = part.endsWith("[]");
+    const key = fanOut ? part.slice(0, -2) : part;
+    const next = [];
+    for (const [node, prefix] of nodes) {
+      if (node === null || typeof node !== "object") continue;
+      const child = node[key];
+      if (fanOut && Array.isArray(child)) {
+        child.forEach((item, i) => {
+          if (item !== null && typeof item === "object" && !Array.isArray(item)) {
+            next.push([item, `${prefix}${key}[${i}].`]);
+          }
+        });
+      } else if (!fanOut && child !== null && typeof child === "object" && !Array.isArray(child)) {
+        next.push([child, `${prefix}${key}.`]);
+      }
+    }
+    nodes = next;
+  }
+  return nodes;
+}
+
+function collectMissing(payload, rules) {
+  const missing = [];
+  for (const [scope, fields] of Object.entries(rules)) {
+    for (const [node, prefix] of resolveScope(payload, scope)) {
+      for (const field of fields) {
+        if (!(field in node) || isAbsent(node[field])) missing.push(`${prefix}${field}`);
+      }
+    }
+  }
+  return missing;
+}
+
+const asProblems = (missing) => missing.map((f) => `missing required field ${f}`);
+
+/** Return the problems with a Create Quote payload. */
+function validateQuotePayload(payload) {
+  return asProblems(collectMissing(payload, QUOTE_REQUIRED));
+}
+
+/**
+ * Return the problems with a Create Order payload.
+ *
+ * seel_services is only checked for completeness when present: syncing an
+ * order the shopper did not opt into is normal. Two shape mistakes are
+ * checked separately, because the API accepts both and then fails in ways
+ * that do not look like failures.
+ */
+function validateOrderPayload(payload) {
+  const rules = { ...ORDER_REQUIRED };
+  const services = payload.seel_services;
+  if (!services || !Array.isArray(services)) delete rules["seel_services[]"];
+  const problems = asProblems(collectMissing(payload, rules));
+
+  // Create Order has no top-level quote_id. Sending one is the classic
+  // attach mistake: the API returns 200 with seel_services: null and no
+  // error, so the integration looks healthy while covering nothing.
+  if ("quote_id" in payload) {
+    problems.push(
+      "quote_id must go inside a seel_services entry, not at the top level - " +
+        "a top-level quote_id is ignored and the order attaches no coverage"
+    );
+  }
+  if (services !== undefined && services !== null && !Array.isArray(services)) {
+    problems.push(
+      `seel_services must be an array, got ${typeof services} - ` +
+        "an object is rejected by the parser with a 500"
+    );
+  }
+  return problems;
+}
+
+/** Return the problems with a Create Merchant payload. */
+function validateMerchantPayload(payload) {
+  return asProblems(collectMissing(payload, MERCHANT_REQUIRED));
+}
+
 class SeelClient {
-  constructor(apiKey, baseUrl = SANDBOX_BASE_URL, apiVersion = API_VERSION, timeoutMs = 15000) {
+  constructor(apiKey, baseUrl = SANDBOX_BASE_URL, apiVersion = API_VERSION, timeoutMs = 15000,
+              validate = true) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiVersion = apiVersion;
     this.timeoutMs = timeoutMs;
+    // Pre-flight validation. Turn off for an account Seel has relaxed
+    // fields for, or to let the API be the only authority.
+    this.validate = validate;
+  }
+
+  _check(operation, problems) {
+    if (this.validate && problems.length) throw new SeelValidationError(operation, problems);
   }
 
   async _request(method, path, payload = null) {
@@ -87,6 +268,7 @@ class SeelClient {
    * history so Seel can run risk analysis.
    */
   createMerchant(payload) {
+    this._check("createMerchant", validateMerchantPayload(payload));
     return this._request("POST", "/ecommerce/merchants", payload);
   }
 
@@ -112,6 +294,7 @@ class SeelClient {
    * price + sales_tax - allocated_discounts == final_price.
    */
   createQuote(payload) {
+    this._check("createQuote", validateQuotePayload(payload));
     return this._request("POST", "/ecommerce/quotes", payload);
   }
 
@@ -122,13 +305,53 @@ class SeelClient {
   // -- Orders -------------------------------------------------------------
 
   /**
-   * Sync every new order, opted in or not. On opt-in, include the
-   * seel_services object with the quote_id and price from the latest
-   * quote - that mints the contract and fires the contract.created
-   * webhook. Line items must match the quoted cart.
+   * Sync every new order, opted in or not.
+   *
+   * On opt-in, seel_services must be an ARRAY of entries carrying type,
+   * quote_id and price from the latest quote - that mints the contract and
+   * fires contract.created. Sending quote_id at the top level instead
+   * returns 200 with seel_services: null and no error, which is why this
+   * method checks the response as well as the request.
+   *
+   * Seel does not check the attach against the quote: a price that does not
+   * match the quoted premium, or line items that differ from the quoted
+   * cart, both still mint a contract. Keeping them consistent is the
+   * caller's job.
    */
-  createOrder(payload) {
-    return this._request("POST", "/ecommerce/orders", payload);
+  async createOrder(payload) {
+    this._check("createOrder", validateOrderPayload(payload));
+    const response = await this._request("POST", "/ecommerce/orders", payload);
+    if (this.validate && payload.seel_services) {
+      SeelClient._checkContractMinted(payload, response);
+    }
+    return response;
+  }
+
+  /**
+   * Fail loudly when an attach silently did not take. A failed attach is
+   * contract_id: null on a 200, never a status code, so nothing else in the
+   * stack will notice.
+   */
+  static _checkContractMinted(payload, response) {
+    const services = response.seel_services;
+    if (!services || !services.length) {
+      const n = payload.seel_services.length;
+      throw new SeelContractNotMintedError(
+        response,
+        `sent ${n} seel_services ${n === 1 ? "entry" : "entries"}, response ` +
+          `seel_services is ${JSON.stringify(services)}. Check seel_services is an ` +
+          "array and quote_id is inside it, not at the top level."
+      );
+    }
+    for (const entry of services) {
+      if (entry && entry.contract_id) continue;
+      throw new SeelContractNotMintedError(
+        response,
+        `service ${JSON.stringify(entry && entry.type)} returned contract_id=null ` +
+          `(status=${JSON.stringify(entry && entry.status)}, ` +
+          `error=${JSON.stringify(entry && entry.error)})`
+      );
+    }
   }
 
   /**
@@ -245,6 +468,11 @@ module.exports = {
   PRODUCTION_BASE_URL,
   API_VERSION,
   SeelAPIError,
+  SeelValidationError,
+  SeelContractNotMintedError,
   SeelClient,
+  validateQuotePayload,
+  validateOrderPayload,
+  validateMerchantPayload,
   verifyWebhookSignature,
 };
