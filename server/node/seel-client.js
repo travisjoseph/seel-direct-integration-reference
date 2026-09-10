@@ -219,14 +219,20 @@ function validateMerchantPayload(payload) {
 
 class SeelClient {
   constructor(apiKey, baseUrl = SANDBOX_BASE_URL, apiVersion = API_VERSION, timeoutMs = 15000,
-              validate = true) {
+              validate = true, checkContract = true) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, "");
     this.apiVersion = apiVersion;
     this.timeoutMs = timeoutMs;
-    // Pre-flight validation. Turn off for an account Seel has relaxed
-    // fields for, or to let the API be the only authority.
+    // Pre-flight payload validation against the strict profile. Turn it off
+    // for an account Seel has relaxed fields for, or to let the API be the
+    // only authority on what a valid payload is.
     this.validate = validate;
+    // Post-condition check on createOrder: did a contract actually mint?
+    // Separate from validate on purpose. It reports a real failure the API
+    // returns as a 200, not an opinion about required fields, so turning
+    // validation off should not turn this off too.
+    this.checkContract = checkContract;
   }
 
   _check(operation, problems) {
@@ -321,7 +327,7 @@ class SeelClient {
   async createOrder(payload) {
     this._check("createOrder", validateOrderPayload(payload));
     const response = await this._request("POST", "/ecommerce/orders", payload);
-    if (this.validate && payload.seel_services) {
+    if (this.checkContract && payload.seel_services) {
       SeelClient._checkContractMinted(payload, response);
     }
     return response;

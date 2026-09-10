@@ -264,9 +264,10 @@ pub struct SeelClient {
     api_key: String,
     base_url: String,
     api_version: String,
-    /// Pre-flight validation. Turn off for an account Seel has relaxed
-    /// fields for, or to let the API be the only authority.
+    /// Pre-flight payload validation against the strict profile.
     validate: bool,
+    /// Post-condition check on `create_order`: did a contract actually mint?
+    check_contract: bool,
 }
 
 impl SeelClient {
@@ -288,15 +289,32 @@ impl SeelClient {
             base_url: base_url.trim_end_matches('/').to_string(),
             api_version: api_version.to_string(),
             validate: true,
+            check_contract: true,
         }
     }
 
     /// Turn pre-flight validation off. Do this for an account Seel has
     /// relaxed required fields for, or to let the API be the only
     /// authority on what a valid payload is.
+    ///
+    /// This leaves the `create_order` contract check on, because that
+    /// reports a real failure the API returns as a 200 rather than an
+    /// opinion about required fields. Use
+    /// [`Self::without_contract_check`] to drop that too.
     #[must_use]
     pub fn without_validation(mut self) -> Self {
         self.validate = false;
+        self
+    }
+
+    /// Stop checking that `create_order` actually minted a contract.
+    ///
+    /// Only do this if you check `seel_services[].contract_id` yourself. A
+    /// failed attach is reported as `contract_id: null` on a 200, so
+    /// nothing else in the stack will notice.
+    #[must_use]
+    pub fn without_contract_check(mut self) -> Self {
+        self.check_contract = false;
         self
     }
 
@@ -436,7 +454,7 @@ impl SeelClient {
             .get("seel_services")
             .and_then(Value::as_array)
             .is_some_and(|s| !s.is_empty());
-        if self.validate && attached {
+        if self.check_contract && attached {
             Self::check_contract_minted(payload, &response)?;
         }
         Ok(response)

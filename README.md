@@ -257,16 +257,38 @@ not required to match the quoted cart. Both mint a contract regardless.
 
 ### Turning validation off
 
-The Python, Node and Rust clients validate before sending and raise with
-every problem at once, then check the response of `create_order` for a real
-`contract_id`. Pass `validate=False` (Python), `validate: false` (Node) or
-call `.without_validation()` (Rust) if your account has fields relaxed, or
-if you would rather let the API be the only authority.
+The Python, Node and Rust clients do two separate things, each with its own
+switch, both on by default:
+
+| Switch | What it does | Turn it off when |
+|---|---|---|
+| `validate` | Checks the payload against the strict profile before sending, and raises with every problem at once | Your account has fields relaxed, or you want the API to be the only authority on what a valid payload is |
+| `check_contract` | After `create_order`, checks that a contract actually minted | You inspect `seel_services[].contract_id` yourself |
+
+They are deliberately separate. `validate` encodes an opinion about required
+fields, and that opinion can be wrong for your account. `check_contract`
+does not: a failed attach really is a failure, Seel just reports it as
+`contract_id: null` on a 200. Switching off the opinion should not switch
+off the failure detection.
+
+```python
+SeelClient(api_key, base_url, validate=False)                  # Python
+```
+```javascript
+new SeelClient(apiKey, baseUrl, apiVersion, timeoutMs, false)  // Node
+```
+```rust
+SeelClient::new(&key, &url).without_validation()               // Rust
+```
+
+Rust has `.without_contract_check()` as well; Python and Node take
+`check_contract` / `checkContract` alongside `validate`.
 
 The Java client works in raw JSON strings and has no parser, so it cannot do
-this automatically. Use `SeelValidation.validateQuote` / `validateOrder` /
+either automatically. Use `SeelValidation.validateQuote` / `validateOrder` /
 `validateMerchant`, which take the `Map` your JSON library produces - call
-them before you serialize.
+them before you serialize - and check `contract_id` on the response
+yourself.
 
 ### Errors
 

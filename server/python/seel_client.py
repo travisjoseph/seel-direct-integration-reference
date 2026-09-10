@@ -207,14 +207,20 @@ def validate_merchant_payload(payload: dict) -> list[str]:
 class SeelClient:
     def __init__(self, api_key: str, base_url: str = SANDBOX_BASE_URL,
                  api_version: str = API_VERSION, timeout: int = 15,
-                 validate: bool = True):
+                 validate: bool = True, check_contract: bool = True):
         self.api_key = api_key
         self.base_url = base_url.rstrip("/")
         self.api_version = api_version
         self.timeout = timeout
-        # Pre-flight validation. Turn off for an account Seel has relaxed
-        # fields for, or to let the API be the only authority.
+        # Pre-flight payload validation against the strict profile. Turn it
+        # off for an account Seel has relaxed fields for, or to let the API
+        # be the only authority on what a valid payload is.
         self.validate = validate
+        # Post-condition check on create_order: did a contract actually
+        # mint? Separate from validate on purpose. It reports a real failure
+        # the API returns as a 200, not an opinion about required fields, so
+        # turning validation off should not turn this off too.
+        self.check_contract = check_contract
 
     def _request(self, method: str, path: str, payload: dict | None = None) -> dict:
         # Header names are case-insensitive per RFC 9110; urllib normalizes
@@ -297,7 +303,7 @@ class SeelClient:
         the caller's job."""
         self._check("create_order", validate_order_payload(payload))
         response = self._request("POST", "/ecommerce/orders", payload)
-        if self.validate and payload.get("seel_services"):
+        if self.check_contract and payload.get("seel_services"):
             self._check_contract_minted(payload, response)
         return response
 
