@@ -1,14 +1,37 @@
 //! Example backend for the direct-integration path.
 //!
-//! Two routes:
+//! Routes:
 //! ```text
 //! POST /api/seel/quote  - browser quote proxy: attaches the server-side API
 //!                         key and forwards to Seel's Quote API (the widget
 //!                         never sees the key)
+//!
+//! POST /api/seel/orders                              - create order
+//! POST /api/seel/orders/{order_id}                   - update order
+//! POST /api/seel/orders/{order_id}/cancel            - cancel order
+//! POST /api/seel/orders/{order_id}/fulfillments      - create fulfillment
+//! POST /api/seel/orders/{order_id}/fulfillments/{id} - update fulfillment
+//!
 //! POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
 //!                         events: verifies HMAC, ACKs 200 fast, then hands
 //!                         off for internal fan-out
 //! ```
+//!
+//! The order and fulfillment routes mirror Seel's own path shape, so a caller
+//! already written against Seel's API moves over by changing the base URL and
+//! nothing else.
+//!
+//! Two deployments use these routes differently:
+//!
+//! - Single retailer - the retailer's own backend holds the API key and calls
+//!   Seel directly. The order and fulfillment routes are optional here; call
+//!   [`SeelClient`] from your order pipeline instead if that fits better.
+//! - Platform proxy - the platform holds one API key for every retailer on it,
+//!   retailers point at the platform instead of at Seel, and the platform
+//!   resolves which merchant each request belongs to. Retailers hold no Seel
+//!   credentials at all. See [`authenticate_caller`] and
+//!   [`resolve_merchant_id`] - those two are the whole of what a platform
+//!   must replace.
 //!
 //! Run:
 //! ```text
@@ -91,30 +114,98 @@ fn read_body(request: &mut Request) -> Option<Vec<u8>> {
     }
 }
 
-fn handle_quote(mut request: Request, config: &Config) {
-    let raw = match read_body(&mut request) {
-        Some(b) => b,
-        None => {
-            respond_json(request, 400, &json!({"error": "request body must be JSON"}));
-            return;
+/// The routes this server answers.
+enum Route {
+    Quote,
+    Webhook,
+    CreateOrder,
+    UpdateOrder(String),
+    CancelOrder(String),
+    CreateFulfillment(String),
+    UpdateFulfillment(String, String),
+    NotFound,
+}
+
+/// Percent-decode a single path segment. Path IDs are usually plain
+/// alphanumerics, but decoding keeps this port's behaviour identical to the
+/// Python and Node ones.
+fn percent_decode(segment: &str) -> String {
+    let bytes = segment.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
+            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
+                out.push(byte);
+                i += 3;
+                continue;
+            }
         }
-    };
-    let mut params: Value = match serde_json::from_slice(&raw) {
-        Ok(v) => v,
-        Err(_) => {
-            respond_json(request, 400, &json!({"error": "request body must be JSON"}));
-            return;
-        }
-    };
-    if let Some(obj) = params.as_object_mut() {
-        if !config.merchant_id.is_empty() {
-            obj.insert("merchant_id".to_string(), Value::String(config.merchant_id.clone()));
-        }
-        if !config.quote_type.is_empty() {
-            obj.insert("type".to_string(), Value::String(config.quote_type.clone()));
-        }
+        out.push(bytes[i]);
+        i += 1;
     }
-    match config.client.create_quote(&params) {
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+/// Match a URL onto a route, mirroring Seel's own paths under /api/seel.
+fn parse_route(url: &str) -> Route {
+    let path = url.split('?').next().unwrap_or(url);
+    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
+    match segments.as_slice() {
+        ["api", "seel", "quote"] => Route::Quote,
+        ["webhooks", "seel"] => Route::Webhook,
+        ["api", "seel", "orders"] => Route::CreateOrder,
+        ["api", "seel", "orders", id] => Route::UpdateOrder(percent_decode(id)),
+        ["api", "seel", "orders", id, "cancel"] => Route::CancelOrder(percent_decode(id)),
+        ["api", "seel", "orders", id, "fulfillments"] => {
+            Route::CreateFulfillment(percent_decode(id))
+        }
+        ["api", "seel", "orders", id, "fulfillments", fid] => {
+            Route::UpdateFulfillment(percent_decode(id), percent_decode(fid))
+        }
+        _ => Route::NotFound,
+    }
+}
+
+/// Decide whether the caller may use this proxy.
+///
+/// This demo accepts everyone, which is only safe because it holds a sandbox
+/// key and listens on localhost.
+///
+/// A platform MUST replace this. Retailers authenticate to the platform with
+/// platform credentials - they never receive a Seel API key, because one key
+/// covers every retailer on the platform and would let any holder act as any
+/// other. Return the caller's identity from here and pass it to
+/// [`resolve_merchant_id`] so a retailer can only ever touch its own orders.
+fn authenticate_caller(_request: &Request) -> bool {
+    true
+}
+
+/// Return the merchant ID this request belongs to.
+///
+/// Single retailer: `SEEL_MERCHANT_ID` is set once in the environment and
+/// stamped onto everything, so storefront and pipeline code carry no
+/// program-specific values.
+///
+/// Platform proxy: leave `SEEL_MERCHANT_ID` unset and look the merchant up
+/// from the authenticated caller instead. Deriving it from the caller rather
+/// than trusting the request body is what stops one retailer quoting or
+/// ordering against another's merchant ID.
+fn resolve_merchant_id(config: &Config, params: &Value) -> String {
+    if !config.merchant_id.is_empty() {
+        return config.merchant_id.clone();
+    }
+    params
+        .get("merchant_id")
+        .and_then(Value::as_str)
+        .unwrap_or_default()
+        .to_string()
+}
+
+/// Map a Seel result back onto the caller's response.
+fn respond_result(request: Request, label: &str, result: Result<Value, SeelError>) {
+    match result {
         Ok(resp) => respond_json(request, 200, &resp),
         Err(SeelError::Api(err)) => {
             // Forward Seel's status and error body - it names the
@@ -126,8 +217,116 @@ fn handle_quote(mut request: Request, config: &Config) {
             };
             respond_json(request, err.status, &body);
         }
-        Err(_) => respond_json(request, 502, &json!({"error": "upstream quote request failed"})),
+        Err(_) => respond_json(
+            request,
+            502,
+            &json!({ "error": format!("upstream {label} request failed") }),
+        ),
     }
+}
+
+/// Read and parse a JSON object body, or return the error message to send
+/// back with a 400.
+fn read_json_object(request: &mut Request) -> Result<Value, &'static str> {
+    let raw = read_body(request).ok_or("request body must be JSON")?;
+    let parsed: Value =
+        serde_json::from_slice(&raw).map_err(|_| "request body must be JSON")?;
+    if parsed.is_object() {
+        Ok(parsed)
+    } else {
+        Err("request body must be a JSON object")
+    }
+}
+
+fn handle_quote(mut request: Request, config: &Config) {
+    let mut params = match read_json_object(&mut request) {
+        Ok(v) => v,
+        Err(message) => {
+            respond_json(request, 400, &json!({ "error": message }));
+            return;
+        }
+    };
+    let merchant_id = resolve_merchant_id(config, &params);
+    if let Some(obj) = params.as_object_mut() {
+        if !merchant_id.is_empty() {
+            obj.insert("merchant_id".to_string(), Value::String(merchant_id));
+        }
+        if !config.quote_type.is_empty() {
+            obj.insert("type".to_string(), Value::String(config.quote_type.clone()));
+        }
+    }
+    let result = config.client.create_quote(&params);
+    respond_result(request, "quote", result);
+}
+
+/// Sync every order, opted in or not. On opt-in the body carries
+/// seel_services with the quote_id and price, which mints the contract and
+/// fires contract.created.
+fn handle_create_order(mut request: Request, config: &Config) {
+    let mut params = match read_json_object(&mut request) {
+        Ok(v) => v,
+        Err(message) => {
+            respond_json(request, 400, &json!({ "error": message }));
+            return;
+        }
+    };
+    let merchant_id = resolve_merchant_id(config, &params);
+    if let Some(obj) = params.as_object_mut() {
+        if !merchant_id.is_empty() {
+            obj.insert("merchant_id".to_string(), Value::String(merchant_id));
+        }
+    }
+    let result = config.client.create_order(&params);
+    respond_result(request, "order", result);
+}
+
+fn handle_update_order(mut request: Request, config: &Config, order_id: &str) {
+    let params = match read_json_object(&mut request) {
+        Ok(v) => v,
+        Err(message) => {
+            respond_json(request, 400, &json!({ "error": message }));
+            return;
+        }
+    };
+    let result = config.client.update_order(order_id, &params);
+    respond_result(request, "order update", result);
+}
+
+/// Cancel carries no body.
+fn handle_cancel_order(request: Request, config: &Config, order_id: &str) {
+    let result = config.client.cancel_order(order_id);
+    respond_result(request, "order cancel", result);
+}
+
+fn handle_create_fulfillment(mut request: Request, config: &Config, order_id: &str) {
+    let params = match read_json_object(&mut request) {
+        Ok(v) => v,
+        Err(message) => {
+            respond_json(request, 400, &json!({ "error": message }));
+            return;
+        }
+    };
+    let result = config.client.create_fulfillment(order_id, &params);
+    respond_result(request, "fulfillment", result);
+}
+
+fn handle_update_fulfillment(
+    mut request: Request,
+    config: &Config,
+    order_id: &str,
+    fulfillment_id: &str,
+) {
+    let params = match read_json_object(&mut request) {
+        Ok(v) => v,
+        Err(message) => {
+            respond_json(request, 400, &json!({ "error": message }));
+            return;
+        }
+    };
+    let result = config
+        .client
+        .update_fulfillment(order_id, fulfillment_id, &params);
+    respond_result(request, "fulfillment update", result);
 }
 
 fn handle_webhook(mut request: Request, config: &Config) {
@@ -165,11 +364,33 @@ fn handle_request(request: Request, config: &Config) {
     // they respond.
     let method = request.method().clone();
     let url = request.url().to_string();
-    match (method, url.as_str()) {
-        (Method::Options, _) => respond_preflight(request),
-        (Method::Post, "/api/seel/quote") => handle_quote(request, config),
-        (Method::Post, "/webhooks/seel") => handle_webhook(request, config),
-        _ => respond_json(request, 404, &json!({"error": "not found"})),
+    if method == Method::Options {
+        respond_preflight(request);
+        return;
+    }
+    if method != Method::Post {
+        respond_json(request, 404, &json!({"error": "not found"}));
+        return;
+    }
+
+    let route = parse_route(&url);
+    // The webhook route is authenticated by its HMAC signature instead.
+    if !matches!(route, Route::Webhook) && !authenticate_caller(&request) {
+        respond_json(request, 401, &json!({"error": "unauthorized"}));
+        return;
+    }
+
+    match route {
+        Route::Quote => handle_quote(request, config),
+        Route::Webhook => handle_webhook(request, config),
+        Route::CreateOrder => handle_create_order(request, config),
+        Route::UpdateOrder(id) => handle_update_order(request, config, &id),
+        Route::CancelOrder(id) => handle_cancel_order(request, config, &id),
+        Route::CreateFulfillment(id) => handle_create_fulfillment(request, config, &id),
+        Route::UpdateFulfillment(id, fid) => {
+            handle_update_fulfillment(request, config, &id, &fid)
+        }
+        Route::NotFound => respond_json(request, 404, &json!({"error": "not found"})),
     }
 }
 

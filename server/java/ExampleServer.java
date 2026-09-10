@@ -2,13 +2,36 @@
  * Example backend for the direct-integration path. JDK 17+ standard library
  * only, no dependencies.
  *
- * Two routes:
+ * Routes:
  *   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
  *                           key and forwards to Seel's Quote API (the widget
  *                           never sees the key)
+ *
+ *   POST /api/seel/orders                                - create order
+ *   POST /api/seel/orders/{orderId}                      - update order
+ *   POST /api/seel/orders/{orderId}/cancel               - cancel order
+ *   POST /api/seel/orders/{orderId}/fulfillments         - create fulfillment
+ *   POST /api/seel/orders/{orderId}/fulfillments/{fid}   - update fulfillment
+ *
  *   POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
  *                           events: verifies HMAC, ACKs 200 fast, then hands
  *                           off for internal fan-out
+ *
+ * The order and fulfillment routes mirror Seel's own path shape, so a caller
+ * already written against Seel's API moves over by changing the base URL and
+ * nothing else.
+ *
+ * Two deployments use these routes differently:
+ *
+ *   Single retailer - the retailer's own backend holds the API key and calls
+ *   Seel directly. The order and fulfillment routes are optional here; call
+ *   SeelClient from your order pipeline instead if that fits better.
+ *
+ *   Platform proxy - the platform holds one API key for every retailer on it,
+ *   retailers point at the platform instead of at Seel, and the platform
+ *   resolves which merchant each request belongs to. Retailers hold no Seel
+ *   credentials at all. See authenticateCaller() and resolveMerchantId()
+ *   below - those two methods are the whole of what a platform must replace.
  *
  * Compile and run:
  *   javac SeelClient.java ExampleServer.java
@@ -30,7 +53,9 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
+import java.util.Arrays;
 import java.util.concurrent.Executors;
 
 public class ExampleServer {
@@ -46,6 +71,45 @@ public class ExampleServer {
     static final String QUOTE_TYPE = env("SEEL_QUOTE_TYPE", "");
 
     static final SeelClient client = new SeelClient(API_KEY, BASE_URL);
+
+    /** A call out to Seel, for {@link #forward}. */
+    @FunctionalInterface
+    interface SeelCall {
+        String call() throws Exception;
+    }
+
+    /**
+     * Decide whether the caller may use this proxy.
+     *
+     * <p>This demo accepts everyone, which is only safe because it holds a
+     * sandbox key and listens on localhost.
+     *
+     * <p>A platform MUST replace this. Retailers authenticate to the platform
+     * with platform credentials - they never receive a Seel API key, because
+     * one key covers every retailer on the platform and would let any holder
+     * act as any other. Return the caller's identity from here and pass it to
+     * {@link #resolveMerchantId} so a retailer can only ever touch its own
+     * orders.
+     */
+    static boolean authenticateCaller(HttpExchange exchange) {
+        return true;
+    }
+
+    /**
+     * Return the merchant ID this request belongs to.
+     *
+     * <p>Single retailer: SEEL_MERCHANT_ID is set once in the environment and
+     * stamped onto everything, so storefront and pipeline code carry no
+     * program-specific values.
+     *
+     * <p>Platform proxy: leave SEEL_MERCHANT_ID unset and look the merchant up
+     * from the authenticated caller instead. Deriving it from the caller
+     * rather than trusting the request body is what stops one retailer
+     * quoting or ordering against another's merchant ID.
+     */
+    static String resolveMerchantId(HttpExchange exchange) {
+        return MERCHANT_ID;
+    }
 
     private static String env(String name, String fallback) {
         String value = System.getenv(name);
@@ -116,55 +180,131 @@ public class ExampleServer {
 
         byte[] body = exchange.getRequestBody().readAllBytes();
 
-        if (method.equalsIgnoreCase("POST") && path.equals("/api/seel/quote")) {
+        if (!method.equalsIgnoreCase("POST")) {
+            respond(exchange, 404, "{\"error\": \"not found\"}");
+            return;
+        }
+
+        if (path.equals("/webhooks/seel")) {
+            handleWebhook(exchange, body);
+            return;
+        }
+
+        if (!authenticateCaller(exchange)) {
+            respond(exchange, 401, "{\"error\": \"unauthorized\"}");
+            return;
+        }
+
+        if (path.equals("/api/seel/quote")) {
             handleQuote(exchange, body);
             return;
         }
 
-        if (method.equalsIgnoreCase("POST") && path.equals("/webhooks/seel")) {
-            handleWebhook(exchange, body);
-            return;
+        // Routes mirroring Seel's own paths under /api/seel.
+        String[] seg = segments(path);
+        if (seg.length >= 3 && seg[0].equals("api") && seg[1].equals("seel")
+                && seg[2].equals("orders")) {
+            // Sync every order, opted in or not. On opt-in the body carries
+            // seel_services with the quote_id and price, which mints the
+            // contract and fires contract.created.
+            if (seg.length == 3) {
+                String params = spliceFields(exchange, body, merchantIdField(exchange));
+                if (params == null) {
+                    return;
+                }
+                forward(exchange, "order", () -> client.createOrder(params));
+                return;
+            }
+            String orderId = decode(seg[3]);
+            if (seg.length == 4) {
+                String params = spliceFields(exchange, body, "");
+                if (params == null) {
+                    return;
+                }
+                forward(exchange, "order update", () -> client.updateOrder(orderId, params));
+                return;
+            }
+            // Cancel carries no body.
+            if (seg.length == 5 && seg[4].equals("cancel")) {
+                forward(exchange, "order cancel", () -> client.cancelOrder(orderId));
+                return;
+            }
+            if (seg.length == 5 && seg[4].equals("fulfillments")) {
+                String params = spliceFields(exchange, body, "");
+                if (params == null) {
+                    return;
+                }
+                forward(exchange, "fulfillment",
+                        () -> client.createFulfillment(orderId, params));
+                return;
+            }
+            if (seg.length == 6 && seg[4].equals("fulfillments")) {
+                String fulfillmentId = decode(seg[5]);
+                String params = spliceFields(exchange, body, "");
+                if (params == null) {
+                    return;
+                }
+                forward(exchange, "fulfillment update",
+                        () -> client.updateFulfillment(orderId, fulfillmentId, params));
+                return;
+            }
         }
 
         respond(exchange, 404, "{\"error\": \"not found\"}");
     }
 
-    private static void handleQuote(HttpExchange exchange, byte[] body) throws IOException {
+    /** Split a path into its non-empty segments. */
+    private static String[] segments(String path) {
+        return Arrays.stream(path.split("/")).filter(s -> !s.isEmpty()).toArray(String[]::new);
+    }
+
+    /**
+     * Percent-decode one path segment. "+" is escaped first because
+     * URLDecoder treats it as a space, which is a query-string rule and
+     * wrong for a path.
+     */
+    private static String decode(String segment) {
+        return URLDecoder.decode(segment.replace("+", "%2B"), StandardCharsets.UTF_8);
+    }
+
+    /** The merchant_id JSON pair to splice in, or "" when none is set. */
+    private static String merchantIdField(HttpExchange exchange) {
+        String merchantId = resolveMerchantId(exchange);
+        return merchantId.isEmpty()
+                ? ""
+                : "\"merchant_id\":\"" + jsonEscape(merchantId) + "\"";
+    }
+
+    /**
+     * Validate a JSON object body and splice extra pairs in after the
+     * opening "{" - a demo-only shortcut for having no JSON library. The
+     * pairs are always inserted, so if the caller also sent those keys the
+     * object gets duplicate keys, and which value Seel uses isn't guaranteed
+     * (parsers differ on duplicate-key precedence). In a real backend, parse
+     * the body and set the fields with your JSON library.
+     *
+     * <p>Answers 400 and returns null when the body isn't a JSON object.
+     */
+    private static String spliceFields(HttpExchange exchange, byte[] body, String injected)
+            throws IOException {
         String trimmed = new String(body, StandardCharsets.UTF_8).strip();
         if (trimmed.isEmpty() || !trimmed.startsWith("{")) {
             respond(exchange, 400, "{\"error\": \"request body must be JSON\"}");
-            return;
+            return null;
         }
+        if (injected.isEmpty()) {
+            return trimmed;
+        }
+        String rest = trimmed.substring(1).strip();
+        // "{}" body: no trailing comma after the injected pairs.
+        return rest.equals("}") ? "{" + injected + "}" : "{" + injected + "," + rest;
+    }
 
-        // Splice the program values in right after the opening "{" - a
-        // demo-only shortcut for having no JSON library. They are always
-        // inserted, so if the storefront also sent merchant_id or type the
-        // object gets duplicate keys, and which value Seel uses isn't
-        // guaranteed (parsers differ on duplicate-key precedence).
-        // Storefront code should omit these keys, as the README describes.
-        // In a real backend, parse the body and set the fields with your
-        // JSON library.
-        StringBuilder injected = new StringBuilder();
-        if (!MERCHANT_ID.isEmpty()) {
-            injected.append("\"merchant_id\":\"").append(jsonEscape(MERCHANT_ID)).append("\"");
-        }
-        if (!QUOTE_TYPE.isEmpty()) {
-            if (injected.length() > 0) {
-                injected.append(",");
-            }
-            injected.append("\"type\":\"").append(jsonEscape(QUOTE_TYPE)).append("\"");
-        }
-        String params;
-        if (injected.length() == 0) {
-            params = trimmed;
-        } else {
-            String rest = trimmed.substring(1).strip();
-            // "{}" body: no trailing comma after the injected pairs.
-            params = rest.equals("}") ? "{" + injected + "}" : "{" + injected + "," + rest;
-        }
-
+    /** Call Seel and mirror the result back to the caller. */
+    private static void forward(HttpExchange exchange, String label, SeelCall call)
+            throws IOException {
         try {
-            respond(exchange, 200, client.createQuote(params));
+            respond(exchange, 200, call.call());
         } catch (SeelApiException e) {
             // Forward Seel's status and error body - it names the
             // offending field.
@@ -177,10 +317,29 @@ public class ExampleServer {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
-            respond(exchange, 502, "{\"error\": \"upstream quote request failed\"}");
+            respond(exchange, 502,
+                    "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
         } catch (Exception e) {
-            respond(exchange, 502, "{\"error\": \"upstream quote request failed\"}");
+            respond(exchange, 502,
+                    "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
         }
+    }
+
+    private static void handleQuote(HttpExchange exchange, byte[] body) throws IOException {
+        StringBuilder injected = new StringBuilder(merchantIdField(exchange));
+        if (!QUOTE_TYPE.isEmpty()) {
+            if (injected.length() > 0) {
+                injected.append(",");
+            }
+            injected.append("\"type\":\"").append(jsonEscape(QUOTE_TYPE)).append("\"");
+        }
+        // Storefront code should omit merchant_id and type, as the README
+        // describes - spliceFields always inserts them.
+        String params = spliceFields(exchange, body, injected.toString());
+        if (params == null) {
+            return;
+        }
+        forward(exchange, "quote", () -> client.createQuote(params));
     }
 
     private static void handleWebhook(HttpExchange exchange, byte[] body) throws IOException {

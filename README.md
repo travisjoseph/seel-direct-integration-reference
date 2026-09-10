@@ -26,8 +26,8 @@ widget/
 server/             The same backend in four languages - pick yours. Each
                     has a client for every /v1/ecommerce/* endpoint and an
                     example server: a quote proxy that keeps the API key off
-                    the browser, and a webhook endpoint that checks HMAC
-                    signatures.
+                    the browser, order and fulfillment routes, and a webhook
+                    endpoint that checks HMAC signatures.
   python/           Stdlib only.        python3 example_server.py
   node/             Node 18+ built-ins. node example-server.js
   rust/             Small crate.        cargo run
@@ -51,6 +51,68 @@ onboarding:
 With `SEEL_MERCHANT_ID` and `SEEL_QUOTE_TYPE` set, the proxy stamps them
 into every quote request. The storefront embed is then identical for every
 program and every retailer; only the backend environment differs.
+
+## Two deployment shapes
+
+The same code covers both; which one you are decides who runs the example
+server and what the retailer holds.
+
+**Single retailer.** The retailer's own backend holds the API key and calls
+Seel directly. The quote proxy keeps the key off the browser; orders and
+fulfillments usually go straight through `SeelClient` from the order
+pipeline, so the order routes are optional.
+
+```
+storefront widget ──▶ retailer backend ──▶ Seel
+```
+
+**Platform proxy.** The platform holds **one** API key covering every
+retailer on it, and retailers point at the platform instead of at Seel.
+Retailers hold no Seel credentials at all - only their merchant ID, or
+nothing. The platform creates each merchant, resolves which merchant an
+incoming request belongs to, and receives every webhook, so it has full
+visibility into contracts and claims across its retailers.
+
+```
+storefront widget ──▶ platform proxy ──▶ Seel
+retailer backend  ──▶ platform proxy ──▶ Seel
+```
+
+Because the proxy routes mirror Seel's own path shape, a retailer already
+written against Seel's API moves onto a platform by changing the base URL
+and nothing else.
+
+Two functions in each example server are the whole of what a platform must
+replace:
+
+| Function | Replace it with |
+|---|---|
+| `authenticate_caller` | Your own retailer authentication. Never hand a retailer the Seel API key - one key covers every retailer on the platform, so any holder could act as any other. |
+| `resolve_merchant_id` | A lookup from the authenticated caller to that retailer's merchant ID. Deriving it from the caller rather than trusting the request body is what stops one retailer ordering against another's merchant ID. |
+
+Leave `SEEL_MERCHANT_ID` unset when running as a platform - it exists to
+stamp a single merchant onto every request, which is the single-retailer
+case.
+
+## Proxy routes
+
+The example server answers these. All are POST.
+
+| Route | Calls |
+|---|---|
+| `/api/seel/quote` | `create_quote` |
+| `/api/seel/orders` | `create_order` |
+| `/api/seel/orders/{order_id}` | `update_order` |
+| `/api/seel/orders/{order_id}/cancel` | `cancel_order` |
+| `/api/seel/orders/{order_id}/fulfillments` | `create_fulfillment` |
+| `/api/seel/orders/{order_id}/fulfillments/{fulfillment_id}` | `update_fulfillment` |
+| `/webhooks/seel` | HMAC-verified webhook receiver |
+
+Seel's status and error body are passed straight back through, so the
+caller sees the field Seel objected to. An unreachable Seel answers 502.
+
+Merchant onboarding (`create_merchant`, `create_orders_batch`) has no
+route: it runs from your onboarding flow, not from a retailer request.
 
 ## Integration flow
 

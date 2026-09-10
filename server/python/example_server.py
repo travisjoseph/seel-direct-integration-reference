@@ -1,12 +1,35 @@
 """Example backend for the direct-integration path. Stdlib only.
 
-Two routes:
+Routes:
   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
                           key and forwards to Seel's Quote API (the widget
                           never sees the key)
+
+  POST /api/seel/orders                                     - create order
+  POST /api/seel/orders/{order_id}                          - update order
+  POST /api/seel/orders/{order_id}/cancel                   - cancel order
+  POST /api/seel/orders/{order_id}/fulfillments             - create fulfillment
+  POST /api/seel/orders/{order_id}/fulfillments/{fid}       - update fulfillment
+
   POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
                           events: verifies HMAC, ACKs 200 fast, then hands
                           off for internal fan-out
+
+The order and fulfillment routes mirror Seel's own path shape, so a caller
+already written against Seel's API moves over by changing the base URL and
+nothing else.
+
+Two deployments use these routes differently:
+
+  Single retailer - the retailer's own backend holds the API key and calls
+  Seel directly. The order and fulfillment routes are optional here; call
+  SeelClient from your order pipeline instead if that fits better.
+
+  Platform proxy - the platform holds one API key for every retailer on it,
+  retailers point at the platform instead of at Seel, and the platform
+  resolves which merchant each request belongs to. Retailers hold no Seel
+  credentials at all. See authenticate_caller() and resolve_merchant_id()
+  below - those two functions are the whole of what a platform must replace.
 
 Run:
   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... python3 example_server.py
@@ -20,7 +43,9 @@ doesn't serve the demo page:
 
 import json
 import os
+import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from urllib.parse import unquote
 
 from seel_client import SANDBOX_BASE_URL, SeelAPIError, SeelClient, verify_webhook_signature
 
@@ -34,6 +59,47 @@ MERCHANT_ID = os.environ.get("SEEL_MERCHANT_ID", "")
 QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
 
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
+
+# Route patterns, mirroring Seel's own paths under an /api/seel prefix.
+QUOTE_PATH = "/api/seel/quote"
+WEBHOOK_PATH = "/webhooks/seel"
+ORDERS_PATH = re.compile(r"^/api/seel/orders$")
+ORDER_PATH = re.compile(r"^/api/seel/orders/([^/]+)$")
+ORDER_CANCEL_PATH = re.compile(r"^/api/seel/orders/([^/]+)/cancel$")
+FULFILLMENTS_PATH = re.compile(r"^/api/seel/orders/([^/]+)/fulfillments$")
+FULFILLMENT_PATH = re.compile(r"^/api/seel/orders/([^/]+)/fulfillments/([^/]+)$")
+
+
+def authenticate_caller(headers) -> bool:
+    """Decide whether the caller may use this proxy.
+
+    This demo accepts everyone, which is only safe because it holds a
+    sandbox key and listens on localhost.
+
+    A platform MUST replace this. Retailers authenticate to the platform
+    with platform credentials - they never receive a Seel API key, because
+    one key covers every retailer on the platform and would let any holder
+    act as any other. Return the caller's identity from here and pass it to
+    resolve_merchant_id() so a retailer can only ever touch its own orders.
+    """
+    return True
+
+
+def resolve_merchant_id(params: dict) -> str:
+    """Return the merchant ID this request belongs to.
+
+    Single retailer: SEEL_MERCHANT_ID is set once in the environment and
+    stamped onto everything, so storefront and pipeline code carry no
+    program-specific values.
+
+    Platform proxy: leave SEEL_MERCHANT_ID unset and look the merchant up
+    from the authenticated caller instead. Deriving it from the caller
+    rather than trusting the request body is what stops one retailer
+    quoting or ordering against another's merchant ID.
+    """
+    if MERCHANT_ID:
+        return MERCHANT_ID
+    return params.get("merchant_id", "")
 
 
 def handle_webhook_event(event: dict) -> None:
@@ -68,30 +134,104 @@ class Handler(BaseHTTPRequestHandler):
             length = 0
         return self.rfile.read(length) if length > 0 else b""
 
+    def _forward(self, label: str, call) -> None:
+        """Call Seel and mirror the result back to the caller."""
+        try:
+            self._respond(200, call())
+        except SeelAPIError as exc:
+            # Forward Seel's status and error body - it names the
+            # offending field.
+            self._respond(exc.status, exc.body if isinstance(exc.body, dict) else {"error": str(exc)})
+        except Exception:
+            self._respond(502, {"error": f"upstream {label} request failed"})
+
+    def _json_body(self, body: bytes):
+        """Parse a JSON object body, or answer 400 and return None."""
+        try:
+            params = json.loads(body)
+        except json.JSONDecodeError:
+            self._respond(400, {"error": "request body must be JSON"})
+            return None
+        if not isinstance(params, dict):
+            self._respond(400, {"error": "request body must be a JSON object"})
+            return None
+        return params
+
+    def do_GET(self):
+        # Only POST routes exist; answer in JSON like the other ports rather
+        # than letting BaseHTTPRequestHandler emit its HTML 501 page.
+        self._respond(404, {"error": "not found"})
+
     def do_POST(self):
         body = self._read_body()
 
-        if self.path == "/api/seel/quote":
-            try:
-                params = json.loads(body)
-            except json.JSONDecodeError:
-                self._respond(400, {"error": "request body must be JSON"})
-                return
-            if MERCHANT_ID:
-                params["merchant_id"] = MERCHANT_ID
-            if QUOTE_TYPE:
-                params["type"] = QUOTE_TYPE
-            try:
-                self._respond(200, client.create_quote(params))
-            except SeelAPIError as exc:
-                # Forward Seel's status and error body - it names the
-                # offending field.
-                self._respond(exc.status, exc.body if isinstance(exc.body, dict) else {"error": str(exc)})
-            except Exception:
-                self._respond(502, {"error": "upstream quote request failed"})
+        if self.path != WEBHOOK_PATH and not authenticate_caller(self.headers):
+            self._respond(401, {"error": "unauthorized"})
             return
 
-        if self.path == "/webhooks/seel":
+        if self.path == QUOTE_PATH:
+            params = self._json_body(body)
+            if params is None:
+                return
+            merchant_id = resolve_merchant_id(params)
+            if merchant_id:
+                params["merchant_id"] = merchant_id
+            if QUOTE_TYPE:
+                params["type"] = QUOTE_TYPE
+            self._forward("quote", lambda: client.create_quote(params))
+            return
+
+        # Sync every order, opted in or not. On opt-in the body carries
+        # seel_services with the quote_id and price, which mints the
+        # contract and fires contract.created.
+        if ORDERS_PATH.match(self.path):
+            params = self._json_body(body)
+            if params is None:
+                return
+            merchant_id = resolve_merchant_id(params)
+            if merchant_id:
+                params["merchant_id"] = merchant_id
+            self._forward("order", lambda: client.create_order(params))
+            return
+
+        # Cancel carries no body.
+        match = ORDER_CANCEL_PATH.match(self.path)
+        if match:
+            order_id = unquote(match.group(1))
+            self._forward("order cancel", lambda: client.cancel_order(order_id))
+            return
+
+        match = FULFILLMENT_PATH.match(self.path)
+        if match:
+            order_id, fulfillment_id = unquote(match.group(1)), unquote(match.group(2))
+            params = self._json_body(body)
+            if params is None:
+                return
+            self._forward(
+                "fulfillment update",
+                lambda: client.update_fulfillment(order_id, fulfillment_id, params),
+            )
+            return
+
+        match = FULFILLMENTS_PATH.match(self.path)
+        if match:
+            order_id = unquote(match.group(1))
+            params = self._json_body(body)
+            if params is None:
+                return
+            self._forward("fulfillment", lambda: client.create_fulfillment(order_id, params))
+            return
+
+        match = ORDER_PATH.match(self.path)
+        if match:
+            order_id = unquote(match.group(1))
+            params = self._json_body(body)
+            if params is None:
+                return
+            self._forward("order update", lambda: client.update_order(order_id, params))
+            return
+
+        if self.path == WEBHOOK_PATH:
             signature = self.headers.get("X-Seel-Hmac-SHA256", "")
             if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
                 self._respond(401, {"error": "invalid signature"})
