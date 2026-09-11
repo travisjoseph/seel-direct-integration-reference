@@ -83,6 +83,13 @@ pub fn safe_path_param(raw: &str) -> Option<String> {
     if RESERVED_PATH_SEGMENTS.contains(&decoded.as_str()) {
         return None;
     }
+    // A segment that is only dots is refused too: a decoded ".." is not a
+    // slash, but HTTP clients normalize it away, so "orders/%2E%2E/cancel"
+    // leaves this proxy as a request to /v1/ecommerce/cancel - a different
+    // endpoint than the route names.
+    if !decoded.is_empty() && decoded.chars().all(|c| c == '.') {
+        return None;
+    }
     Some(decoded)
 }
 
@@ -938,6 +945,9 @@ mod tests {
         assert_eq!(safe_path_param("%zz"), None); // malformed escape
         assert_eq!(safe_path_param("%FF"), None); // invalid UTF-8
         assert_eq!(safe_path_param("batch"), None); // Seel's own batch endpoint
+        assert_eq!(safe_path_param("%2E%2E"), None); // normalizes to a parent hop
+        assert_eq!(safe_path_param(".."), None);
+        assert_eq!(safe_path_param("."), None);
     }
 
     #[test]

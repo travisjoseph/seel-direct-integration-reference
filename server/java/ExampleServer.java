@@ -385,6 +385,13 @@ public class ExampleServer {
         if (decoded.indexOf('/') >= 0 || RESERVED_PATH_SEGMENTS.contains(decoded)) {
             return null;
         }
+        // A segment that is only dots is refused too: a decoded ".." is not
+        // a slash, but HTTP clients normalize it away, so
+        // "orders/%2E%2E/cancel" leaves this proxy as a request to
+        // /v1/ecommerce/cancel - a different endpoint than the route names.
+        if (!decoded.isEmpty() && decoded.chars().allMatch(c -> c == '.')) {
+            return null;
+        }
         for (int i = 0; i < decoded.length(); i++) {
             char c = decoded.charAt(i);
             if (c < 0x20 || c == 0x7F) {
@@ -466,6 +473,17 @@ public class ExampleServer {
             throws IOException {
         try {
             String body = call.call();
+            // A 200 whose body is not JSON is not a success: a CDN or
+            // gateway error page in front of Seel would otherwise be
+            // relayed to the caller as a completed order sync. The other
+            // three ports get this for free by parsing the response.
+            if (SeelValidation.parseJson(body) == null) {
+                System.out.println("[proxy] " + label + ": upstream returned a non-JSON body");
+                respond(exchange, 502,
+                        "{\"error\": \"upstream " + jsonEscape(label)
+                                + " returned a non-JSON body\"}");
+                return;
+            }
             if (checkContract) {
                 String reason = SeelValidation.contractNotMintedReason(body);
                 if (reason != null) {

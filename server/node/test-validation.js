@@ -34,6 +34,17 @@ const validators = {
   merchant: validateMerchantPayload,
 };
 
+// The fixture is the single point of failure for cross-port drift, so an
+// emptied or defanged one has to fail rather than pass green.
+test("fixture is populated", () => {
+  assert.ok(cases.length && contractCases.length && uncovered.length, "fixture is empty");
+  for (const testCase of cases) {
+    if (!testCase.expect_clean) {
+      assert.ok(testCase.expect_contains?.length, `${testCase.name}: expect_contains is empty`);
+    }
+  }
+});
+
 for (const testCase of cases) {
   test(testCase.name, () => {
     const problems = validators[testCase.operation](testCase.payload);

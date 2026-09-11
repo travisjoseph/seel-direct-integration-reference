@@ -109,6 +109,11 @@ function safePathParam(raw) {
   }
   if (decoded.includes("/")) return null;
   if (RESERVED_PATH_SEGMENTS.has(decoded)) return null;
+  // A segment that is only dots is refused too: a decoded ".." is not a
+  // slash, but fetch normalizes it away, so "orders/%2E%2E/cancel" leaves
+  // this proxy as a request to /v1/ecommerce/cancel - a different endpoint
+  // than the route names.
+  if (/^\.+$/.test(decoded)) return null;
   for (const ch of decoded) {
     const code = ch.codePointAt(0);
     if (code < 0x20 || code === 0x7f) return null;

@@ -122,6 +122,12 @@ def safe_path_param(raw: str):
         return None
     if decoded in RESERVED_PATH_SEGMENTS:
         return None
+    # A segment that is only dots is refused too: a decoded ".." is not a
+    # slash, but HTTP clients normalize it away, so "orders/%2E%2E/cancel"
+    # leaves this proxy as a request to /v1/ecommerce/cancel - a different
+    # endpoint than the route names.
+    if decoded.strip(".") == "":
+        return None
     return decoded
 
 
@@ -220,7 +226,9 @@ class Handler(BaseHTTPRequestHandler):
             # Seel accepted the order and minted no contract. 502 would be
             # wrong twice over: the upstream call succeeded, and a retry
             # would duplicate the order.
-            print(f"[proxy] {label}: {exc}")
+            # flush: stdout is block-buffered when it is not a tty, and
+            # this process never exits, so an unflushed line is never seen.
+            print(f"[proxy] {label}: {exc}", flush=True)
             self._respond(409, {"error": str(exc), "seel_response": exc.response})
         except SeelAPIError as exc:
             # Forward Seel's status and error body - it names the
@@ -229,16 +237,18 @@ class Handler(BaseHTTPRequestHandler):
         except Exception as exc:
             # Log before answering: a bare 502 leaves the operator unable to
             # tell a timeout from a bug in this handler.
-            print(f"[proxy] {label} failed: {exc!r}")
+            print(f"[proxy] {label} failed: {exc!r}", flush=True)
             self._respond(502, {"error": f"upstream {label} request failed"})
 
     def _json_body(self, body: bytes):
         """Parse a JSON object body, or answer 400 and return None."""
         try:
             params = json.loads(body)
-        except (UnicodeDecodeError, json.JSONDecodeError):
-            # UnicodeDecodeError is a ValueError but not a JSONDecodeError,
-            # and would otherwise escape as an HTML 500.
+        except (ValueError, RecursionError):
+            # ValueError covers JSONDecodeError and UnicodeDecodeError;
+            # RecursionError is neither, and a deeply nested body would
+            # otherwise escape do_POST and close the socket with no
+            # response at all.
             self._respond(400, {"error": "request body must be JSON"})
             return None
         if not isinstance(params, dict):

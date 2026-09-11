@@ -24,8 +24,6 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
 
 public final class SeelValidation {
 
@@ -171,13 +169,39 @@ public final class SeelValidation {
         return problems;
     }
 
-    private static final Pattern SEEL_SERVICES_NULL =
-            Pattern.compile("\"seel_services\"\\s*:\\s*null");
-    private static final Pattern CONTRACT_ID_FALSY =
-            Pattern.compile("\"contract_id\"\\s*:\\s*(null|\"\"|0|false)(?![0-9.])");
-    /** A seel_services array with at least one entry. */
-    private static final Pattern SEEL_SERVICES_NONEMPTY =
-            Pattern.compile("\"seel_services\"\\s*:\\s*\\[\\s*\\{");
+    /**
+     * Parse a JSON document, or return null if it is not valid JSON.
+     *
+     * <p>SeelClient works in raw JSON strings to stay dependency-free, so
+     * this reader exists to let the checks below reason about structure
+     * rather than pattern-match text. An earlier version scanned with
+     * regexes and got a partial attach wrong in both directions: a response
+     * where one service minted and another failed read as healthy, and an
+     * unrelated null contract_id elsewhere in the body read as a failure.
+     *
+     * <p>It is minimal on purpose. A real backend should use its own JSON
+     * library rather than copy it.
+     */
+    static Object parseJson(String text) {
+        if (text == null || text.isBlank()) {
+            return null;
+        }
+        try {
+            return new Json(text).parse();
+        } catch (RuntimeException e) {
+            return null;
+        }
+    }
+
+    /** Does this request attach coverage, and so warrant a contract check? */
+    public static boolean carriesCoverage(String requestJson) {
+        Object doc = parseJson(requestJson);
+        if (!(doc instanceof Map)) {
+            return false;
+        }
+        Object services = ((Map<?, ?>) doc).get("seel_services");
+        return services instanceof List && !((List<?>) services).isEmpty();
+    }
 
     /**
      * Return why a Create Order response carries no contract, or null if it
@@ -190,36 +214,49 @@ public final class SeelValidation {
      * <p>Pair it with {@link #carriesCoverage} on the request: an order
      * with no seel_services, or an empty array, is a normal uncovered sync
      * and must not be reported as a failure.
-     *
-     * <p>This scans the raw response text rather than parsing it, because
-     * SeelClient is deliberately dependency-free. That makes it a
-     * best-effort check, not a parser: it will not understand a
-     * contract_id nested somewhere unexpected. Call it only when the
-     * request actually carried a seel_services array. With a JSON library
-     * available, read seel_services[].contract_id directly instead.
      */
-    public static boolean carriesCoverage(String requestJson) {
-        return requestJson != null && SEEL_SERVICES_NONEMPTY.matcher(requestJson).find();
-    }
-
     public static String contractNotMintedReason(String responseJson) {
-        if (responseJson == null || responseJson.isEmpty()) {
-            return "empty response body";
+        Object doc = parseJson(responseJson);
+        if (!(doc instanceof Map)) {
+            return "response was not a JSON object";
         }
-        if (SEEL_SERVICES_NULL.matcher(responseJson).find()) {
-            return "response seel_services is null - check seel_services is an array and "
-                    + "quote_id is inside it, not at the top level";
+        Object services = ((Map<?, ?>) doc).get("seel_services");
+        if (!(services instanceof List) || ((List<?>) services).isEmpty()) {
+            return "response seel_services is " + describe(services)
+                    + " - check seel_services is an array and quote_id is inside it, not at "
+                    + "the top level";
         }
-        Matcher m = CONTRACT_ID_FALSY.matcher(responseJson);
-        if (m.find()) {
-            // Falsy means not minted, matching the other ports: null, "",
-            // 0 and false all mean no contract.
-            return "a seel_services entry returned contract_id " + m.group(1);
-        }
-        if (!responseJson.contains("contract_id")) {
-            return "response carries no contract_id";
+        for (Object entry : (List<?>) services) {
+            if (!(entry instanceof Map)) {
+                return "seel_services contains a non-object entry: " + describe(entry);
+            }
+            Map<?, ?> service = (Map<?, ?>) entry;
+            if (!isMinted(service.get("contract_id"))) {
+                return "service " + describe(service.get("type")) + " returned contract_id "
+                        + describe(service.get("contract_id")) + " (status="
+                        + describe(service.get("status")) + ", error="
+                        + describe(service.get("error")) + ")";
+            }
         }
         return null;
+    }
+
+    /**
+     * Falsy means not minted, matching the other ports: null, "", 0 and
+     * false all mean no contract. A string "012" is a real id.
+     */
+    private static boolean isMinted(Object contractId) {
+        if (contractId == null) return false;
+        if (contractId instanceof String) return !((String) contractId).isEmpty();
+        if (contractId instanceof Boolean) return (Boolean) contractId;
+        if (contractId instanceof Number) return ((Number) contractId).doubleValue() != 0.0;
+        return true;
+    }
+
+    private static String describe(Object value) {
+        if (value == null) return "null";
+        if (value instanceof String) return "\"" + value + "\"";
+        return String.valueOf(value);
     }
 
     /** Return the problems with a Create Merchant payload. Empty means clean. */
@@ -301,5 +338,134 @@ public final class SeelValidation {
             nodes = next;
         }
         return nodes;
+    }
+
+    static final class Json {
+        private final String src;
+        private int pos;
+
+        Json(String src) {
+            this.src = src;
+        }
+
+        Object parse() {
+            Object value = readValue();
+            skipWhitespace();
+            if (pos != src.length()) {
+                throw new IllegalArgumentException("trailing input at " + pos);
+            }
+            return value;
+        }
+
+        private Object readValue() {
+            skipWhitespace();
+            char c = src.charAt(pos);
+            return switch (c) {
+                case '{' -> readObject();
+                case '[' -> readArray();
+                case '"' -> readString();
+                case 't' -> readLiteral("true", Boolean.TRUE);
+                case 'f' -> readLiteral("false", Boolean.FALSE);
+                case 'n' -> readLiteral("null", null);
+                default -> readNumber();
+            };
+        }
+
+        private Map<String, Object> readObject() {
+            Map<String, Object> out = new LinkedHashMap<>();
+            pos++; // {
+            skipWhitespace();
+            if (src.charAt(pos) == '}') {
+                pos++;
+                return out;
+            }
+            while (true) {
+                skipWhitespace();
+                String key = readString();
+                skipWhitespace();
+                expect(':');
+                out.put(key, readValue());
+                skipWhitespace();
+                char c = src.charAt(pos++);
+                if (c == '}') return out;
+                if (c != ',') throw new IllegalArgumentException("expected , or } at " + pos);
+            }
+        }
+
+        private List<Object> readArray() {
+            List<Object> out = new ArrayList<>();
+            pos++; // [
+            skipWhitespace();
+            if (src.charAt(pos) == ']') {
+                pos++;
+                return out;
+            }
+            while (true) {
+                out.add(readValue());
+                skipWhitespace();
+                char c = src.charAt(pos++);
+                if (c == ']') return out;
+                if (c != ',') throw new IllegalArgumentException("expected , or ] at " + pos);
+            }
+        }
+
+        private String readString() {
+            expect('"');
+            StringBuilder sb = new StringBuilder();
+            while (true) {
+                char c = src.charAt(pos++);
+                if (c == '"') return sb.toString();
+                if (c != '\\') {
+                    sb.append(c);
+                    continue;
+                }
+                char esc = src.charAt(pos++);
+                switch (esc) {
+                    case '"', '\\', '/' -> sb.append(esc);
+                    case 'b' -> sb.append('\b');
+                    case 'f' -> sb.append('\f');
+                    case 'n' -> sb.append('\n');
+                    case 'r' -> sb.append('\r');
+                    case 't' -> sb.append('\t');
+                    case 'u' -> {
+                        sb.append((char) Integer.parseInt(src.substring(pos, pos + 4), 16));
+                        pos += 4;
+                    }
+                    default -> throw new IllegalArgumentException("bad escape at " + pos);
+                }
+            }
+        }
+
+        private Object readNumber() {
+            int start = pos;
+            while (pos < src.length() && "+-.eE0123456789".indexOf(src.charAt(pos)) >= 0) {
+                pos++;
+            }
+            String text = src.substring(start, pos);
+            // Integers stay integers so a quantity of 1 is not "1.0".
+            return text.contains(".") || text.contains("e") || text.contains("E")
+                    ? (Object) Double.valueOf(text)
+                    : (Object) Long.valueOf(text);
+        }
+
+        private Object readLiteral(String literal, Object value) {
+            if (!src.startsWith(literal, pos)) {
+                throw new IllegalArgumentException("bad literal at " + pos);
+            }
+            pos += literal.length();
+            return value;
+        }
+
+        private void expect(char c) {
+            if (src.charAt(pos++) != c) {
+                throw new IllegalArgumentException("expected " + c + " at " + (pos - 1));
+            }
+        }
+
+        private void skipWhitespace() {
+            while (pos < src.length() && Character.isWhitespace(src.charAt(pos))) {
+                pos++;
+            }
+        }
     }
 }
