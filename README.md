@@ -179,8 +179,42 @@ Credentials live in environment variables. Never commit them.
 | Sandbox | `https://api-test.seel.com` |
 | Production | `https://api.seel.com` |
 
+Nothing in this repo hardcodes a host. The base URL comes from
+`SEEL_BASE_URL`, or from the constructor if you pass one, so moving between
+environments is a config change and never a code change.
+
+**Four values are environment-scoped, not one.** Swapping only the URL will
+fail on the first call:
+
+| Value | Why it differs |
+|---|---|
+| `SEEL_BASE_URL` | the environment |
+| `SEEL_API_KEY` | keys are issued per environment; a sandbox key does not authenticate against production |
+| `SEEL_WEBHOOK_SECRET` | issued with the key, so it changes with it |
+| `SEEL_MERCHANT_ID` | merchants are created per environment, so a retailer onboarded in sandbox has a different ID in production |
+
+`SEEL_QUOTE_TYPE` is usually the same string in both, but confirm it with
+your Seel contact rather than assuming.
+
+Two things that do **not** carry over and are easy to miss, because both are
+configured by Seel rather than by you:
+
+- **Webhook URLs.** Registration is manual and per environment. Registering
+  a sandbox endpoint does nothing for production.
+- **Rates and market eligibility.** These are configured per merchant. A
+  currency that is priced in sandbox may not be in production, and the
+  reverse. An unpriced market does not error - the quote comes back
+  `accepted` with `price: 0.0` and the coverage missing from `coverages[]`,
+  which is easy to mistake for a working integration. Check
+  `coverages[]` is non-empty before treating a quote as an offer.
+
+So the intended flow is: keep one `.env` per environment, switch which one
+is loaded, and confirm with Seel that webhooks and rates are configured on
+the target environment before the first real order.
+
 Every request carries `X-Seel-Api-Key` and `X-Seel-Api-Version`. The pinned
-version is the `API_VERSION` constant in each client;
+version is the `API_VERSION` constant in each client and is the same in both
+environments;
 [developer.seel.com](https://developer.seel.com/reference/introduction) has
 the latest. The key is a server-side secret: browser code goes through the
 proxy, never straight to Seel.

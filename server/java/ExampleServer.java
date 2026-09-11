@@ -117,7 +117,13 @@ public class ExampleServer {
     }
 
     /**
-     * Internal fan-out. Parse the payload with your JSON library, map
+     * Before any of this fires, the endpoint has to be registered with Seel.
+     * Seel has no self-serve way to register this URL. There is no webhook field on
+     * Create or Update Merchant and no registration endpoint - ask your Seel contact
+     * to configure it, and tell them which events you want. Do it once per
+     * environment: a sandbox registration does not carry over to production.
+     *
+     * <p>Internal fan-out. Parse the payload with your JSON library, map
      * merchant_id/order_id to your own retailer code and route to your
      * systems. Dedupe on id + type first, since delivery is at-least-once.
      * In production, queue this work off the request thread instead of
