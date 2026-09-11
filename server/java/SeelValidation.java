@@ -77,9 +77,67 @@ public final class SeelValidation {
         return out;
     }
 
+    /**
+     * Shape expectations, checked alongside presence. A scalar where an
+     * object belongs is the archetypal payload mistake, and without this
+     * the nested rules silently skip it: resolveScope only descends into
+     * Maps, so {"customer": "nope"} would report no problems at all.
+     *
+     * <p>Each entry is {parent scope, key, kind}.
+     */
+    private static final String[][] QUOTE_SHAPES = {
+        {"", "customer", "object"},
+        {"", "shipping_address", "object"},
+        {"", "line_items", "array_nonempty"},
+        {"line_items[]", "shipping_origin", "object"},
+    };
+    private static final String[][] ORDER_EXTRA_SHAPES = {{"", "seel_services", "array"}};
+    private static final String[][] MERCHANT_SHAPES = {{"", "seel_services", "array_nonempty"}};
+
+    /**
+     * One vocabulary for type names across all four ports, so the same
+     * mistake reads the same way whichever one a partner runs.
+     */
+    private static String typeName(Object value) {
+        if (value instanceof Map) return "object";
+        if (value instanceof List) return "array";
+        if (value instanceof String) return "string";
+        if (value instanceof Boolean) return "boolean";
+        if (value instanceof Number) return "number";
+        return value == null ? "null" : value.getClass().getSimpleName();
+    }
+
+    private static List<String> checkShapes(Map<String, Object> payload, String[][] specs) {
+        List<String> problems = new ArrayList<>();
+        for (String[] spec : specs) {
+            String scope = spec[0];
+            String key = spec[1];
+            String kind = spec[2];
+            for (Scoped scoped : resolveScope(payload, scope)) {
+                if (!scoped.node.containsKey(key) || scoped.node.get(key) == null) {
+                    continue; // absence is the required-field check's job
+                }
+                Object value = scoped.node.get(key);
+                String path = scoped.prefix + key;
+                if (kind.equals("object") && !(value instanceof Map)) {
+                    problems.add(path + " must be an object, got " + typeName(value));
+                } else if (kind.startsWith("array")) {
+                    if (!(value instanceof List)) {
+                        problems.add(path + " must be an array, got " + typeName(value));
+                    } else if (kind.equals("array_nonempty") && ((List<?>) value).isEmpty()) {
+                        problems.add(path + " must not be empty");
+                    }
+                }
+            }
+        }
+        return problems;
+    }
+
     /** Return the problems with a Create Quote payload. Empty means clean. */
     public static List<String> validateQuote(Map<String, Object> payload) {
-        return asProblems(collectMissing(payload, QUOTE_REQUIRED));
+        List<String> problems = asProblems(collectMissing(payload, QUOTE_REQUIRED));
+        problems.addAll(checkShapes(payload, QUOTE_SHAPES));
+        return problems;
     }
 
     /**
@@ -97,6 +155,8 @@ public final class SeelValidation {
             combined.putAll(ORDER_SERVICE_REQUIRED);
         }
         List<String> problems = asProblems(collectMissing(payload, combined));
+        problems.addAll(checkShapes(payload, QUOTE_SHAPES));
+        problems.addAll(checkShapes(payload, ORDER_EXTRA_SHAPES));
 
         // Create Order has no top-level quote_id. Sending one is the classic
         // attach mistake: the API returns 200 with seel_services: null and no
@@ -105,11 +165,6 @@ public final class SeelValidation {
             problems.add("quote_id must go inside a seel_services entry, not at the top "
                     + "level - a top-level quote_id is ignored and the order attaches no "
                     + "coverage");
-        }
-        if (services != null && !(services instanceof List)) {
-            problems.add("seel_services must be a list, got "
-                    + services.getClass().getSimpleName()
-                    + " - an object is rejected by the parser with a 500");
         }
         return problems;
     }
@@ -154,7 +209,9 @@ public final class SeelValidation {
 
     /** Return the problems with a Create Merchant payload. Empty means clean. */
     public static List<String> validateMerchant(Map<String, Object> payload) {
-        return asProblems(collectMissing(payload, MERCHANT_REQUIRED));
+        List<String> problems = asProblems(collectMissing(payload, MERCHANT_REQUIRED));
+        problems.addAll(checkShapes(payload, MERCHANT_SHAPES));
+        return problems;
     }
 
     private static List<String> asProblems(List<String> missing) {

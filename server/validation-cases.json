@@ -1,0 +1,716 @@
+{
+  "_comment": "Shared validation cases, read by the test suite in every language port. The ports must agree: same accept/reject decision, same field paths. expect_contains matches substrings against the joined problem list.",
+  "cases": [
+    {
+      "name": "quote: complete payload",
+      "operation": "quote",
+      "payload": {
+        "merchant_id": "m-1",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "type": "acme-wfp",
+        "is_default_on": true,
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_clean": true
+    },
+    {
+      "name": "order: complete payload",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_clean": true
+    },
+    {
+      "name": "merchant: complete payload",
+      "operation": "merchant",
+      "payload": {
+        "shop_id": "shop-1",
+        "admin_domain": "shop-1.myshopify.com",
+        "shop_domain": "www.shop-1.com",
+        "shop_platform": "Shopify",
+        "shop_currency": "USD",
+        "shop_name": "Shop One",
+        "contact_name": "Ops",
+        "contact_email": "ops@example.com",
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "is_default_on": true,
+            "coverages": [
+              {
+                "type": "gdd"
+              }
+            ]
+          }
+        ]
+      },
+      "expect_clean": true
+    },
+    {
+      "name": "order: false and 0 are real values, not absences",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": false,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_clean": true,
+      "note": "is_default_on, requires_shipping and allocated_discounts all legitimately take false/0"
+    },
+    {
+      "name": "order: no seel_services is a normal uncovered sync",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_clean": true
+    },
+    {
+      "name": "order: empty seel_services array is also uncovered",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ],
+        "seel_services": []
+      },
+      "expect_clean": true
+    },
+    {
+      "name": "order: top-level quote_id is the classic attach mistake",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ],
+        "quote_id": "q-1"
+      },
+      "expect_contains": [
+        "must go inside a seel_services entry"
+      ],
+      "note": "API returns 200 with seel_services null and no error"
+    },
+    {
+      "name": "order: seel_services must be an array",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ],
+        "seel_services": {
+          "type": "acme-wfp",
+          "quote_id": "q-1",
+          "price": 1.0
+        }
+      },
+      "expect_contains": [
+        "seel_services must be an array"
+      ]
+    },
+    {
+      "name": "order: attach needs type, quote_id and price",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ],
+        "seel_services": [
+          {
+            "type": "acme-wfp"
+          }
+        ]
+      },
+      "expect_contains": [
+        "seel_services[0].quote_id",
+        "seel_services[0].price"
+      ]
+    },
+    {
+      "name": "merchant: coverages key is required",
+      "operation": "merchant",
+      "payload": {
+        "shop_id": "shop-1",
+        "admin_domain": "shop-1.myshopify.com",
+        "shop_domain": "www.shop-1.com",
+        "shop_platform": "Shopify",
+        "shop_currency": "USD",
+        "shop_name": "Shop One",
+        "contact_name": "Ops",
+        "contact_email": "ops@example.com",
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "is_default_on": true
+          }
+        ]
+      },
+      "expect_contains": [
+        "seel_services[0].coverages"
+      ],
+      "note": "omitting it returns a 500 from the API, not a validation error"
+    },
+    {
+      "name": "merchant: empty coverages array is accepted",
+      "operation": "merchant",
+      "payload": {
+        "shop_id": "shop-1",
+        "admin_domain": "shop-1.myshopify.com",
+        "shop_domain": "www.shop-1.com",
+        "shop_platform": "Shopify",
+        "shop_currency": "USD",
+        "shop_name": "Shop One",
+        "contact_name": "Ops",
+        "contact_email": "ops@example.com",
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "is_default_on": true,
+            "coverages": []
+          }
+        ]
+      },
+      "expect_clean": true,
+      "note": "an empty array succeeding is what shows the 500 is a missing null-guard"
+    },
+    {
+      "name": "quote: nested problems report the full path",
+      "operation": "quote",
+      "payload": {
+        "merchant_id": "m-1",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "type": "acme-wfp",
+        "is_default_on": true,
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {}
+          }
+        ]
+      },
+      "expect_contains": [
+        "line_items[0].shipping_origin.country"
+      ]
+    },
+    {
+      "name": "order: a scalar where an object belongs",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": "not-an-object",
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_contains": [
+        "customer must be an object"
+      ]
+    },
+    {
+      "name": "order: an array where an object belongs",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": [
+          1,
+          2
+        ],
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_contains": [
+        "shipping_address must be an object"
+      ]
+    },
+    {
+      "name": "order: nested scalar where an object belongs",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": "US"
+          }
+        ]
+      },
+      "expect_contains": [
+        "line_items[0].shipping_origin must be an object"
+      ]
+    },
+    {
+      "name": "order: an empty cart is not an order",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": []
+      },
+      "expect_contains": [
+        "line_items must not be empty"
+      ]
+    },
+    {
+      "name": "quote: every problem is reported at once, not one at a time",
+      "operation": "quote",
+      "payload": {
+        "merchant_id": "m-1",
+        "session_id": "s-1"
+      },
+      "expect_contains": [
+        "device_category",
+        "device_platform",
+        "type",
+        "is_default_on",
+        "customer",
+        "shipping_address",
+        "line_items"
+      ]
+    }
+  ]
+}

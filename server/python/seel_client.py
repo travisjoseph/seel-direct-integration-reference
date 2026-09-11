@@ -133,6 +133,50 @@ _MERCHANT_REQUIRED = {
 }
 
 
+# Shape expectations, checked alongside presence. A scalar where an object
+# belongs is the archetypal payload mistake, and without this the nested
+# rules silently skip it: _resolve_scope only descends into dicts, so
+# {"customer": "nope"} would report no problems at all.
+#
+# Each entry is (parent scope, key, kind).
+_QUOTE_SHAPES = [
+    ("", "customer", "object"),
+    ("", "shipping_address", "object"),
+    ("", "line_items", "array_nonempty"),
+    ("line_items[]", "shipping_origin", "object"),
+]
+_ORDER_SHAPES = _QUOTE_SHAPES + [("", "seel_services", "array")]
+_MERCHANT_SHAPES = [("", "seel_services", "array_nonempty")]
+
+
+# One vocabulary for type names across all four ports, so the same mistake
+# reads the same way whichever one a partner runs.
+_TYPE_NAMES = {dict: "object", list: "array", str: "string", bool: "boolean",
+               int: "number", float: "number"}
+
+
+def _type_name(value) -> str:
+    return _TYPE_NAMES.get(type(value), type(value).__name__)
+
+
+def _check_shapes(payload: dict, specs: list) -> list:
+    problems = []
+    for scope, key, kind in specs:
+        for node, prefix in _resolve_scope(payload, scope):
+            if key not in node or node[key] is None:
+                continue  # absence is the required-field check's job
+            value = node[key]
+            path = f"{prefix}{key}"
+            if kind == "object" and not isinstance(value, dict):
+                problems.append(f"{path} must be an object, got {_type_name(value)}")
+            elif kind.startswith("array"):
+                if not isinstance(value, list):
+                    problems.append(f"{path} must be an array, got {_type_name(value)}")
+                elif kind == "array_nonempty" and not value:
+                    problems.append(f"{path} must not be empty")
+    return problems
+
+
 def _is_absent(value) -> bool:
     """Missing means the key is absent, None, or an empty string.
 
@@ -179,7 +223,8 @@ def _resolve_scope(payload: dict, scope: str):
 
 def validate_quote_payload(payload: dict) -> list[str]:
     """Return the problems with a Create Quote payload."""
-    return [f"missing required field {f}" for f in _collect_missing(payload, _QUOTE_REQUIRED)]
+    return ([f"missing required field {f}" for f in _collect_missing(payload, _QUOTE_REQUIRED)]
+            + _check_shapes(payload, _QUOTE_SHAPES))
 
 
 def validate_order_payload(payload: dict) -> list[str]:
@@ -195,6 +240,7 @@ def validate_order_payload(payload: dict) -> list[str]:
     if not services or not isinstance(services, list):
         rules.pop("seel_services[]", None)
     problems = [f"missing required field {f}" for f in _collect_missing(payload, rules)]
+    problems += _check_shapes(payload, _ORDER_SHAPES)
 
     # Create Order has no top-level quote_id. Sending one is the classic
     # attach mistake: the API returns 200 with seel_services: null and no
@@ -204,17 +250,13 @@ def validate_order_payload(payload: dict) -> list[str]:
             "quote_id must go inside a seel_services entry, not at the top level - "
             "a top-level quote_id is ignored and the order attaches no coverage"
         )
-    if services is not None and not isinstance(services, list):
-        problems.append(
-            f"seel_services must be a list, got {type(services).__name__} - "
-            "an object is rejected by the parser with a 500"
-        )
     return problems
 
 
 def validate_merchant_payload(payload: dict) -> list[str]:
     """Return the problems with a Create Merchant payload."""
-    return [f"missing required field {f}" for f in _collect_missing(payload, _MERCHANT_REQUIRED)]
+    return ([f"missing required field {f}" for f in _collect_missing(payload, _MERCHANT_REQUIRED)]
+            + _check_shapes(payload, _MERCHANT_SHAPES))
 
 
 class SeelClient:

@@ -143,6 +143,47 @@ const MERCHANT_REQUIRED = {
  * allocated_discounts all legitimately take them. An empty array is a real
  * value too: merchant coverages: [] is accepted.
  */
+// Shape expectations, checked alongside presence. A scalar where an object
+// belongs is the archetypal payload mistake, and without this the nested
+// rules silently skip it: resolveScope only descends into objects, so
+// {customer: "nope"} would report no problems at all.
+//
+// Each entry is [parent scope, key, kind].
+const QUOTE_SHAPES = [
+  ["", "customer", "object"],
+  ["", "shipping_address", "object"],
+  ["", "line_items", "array_nonempty"],
+  ["line_items[]", "shipping_origin", "object"],
+];
+const ORDER_SHAPES = QUOTE_SHAPES.concat([["", "seel_services", "array"]]);
+const MERCHANT_SHAPES = [["", "seel_services", "array_nonempty"]];
+
+function typeName(value) {
+  if (Array.isArray(value)) return "array";
+  return typeof value;
+}
+
+function checkShapes(payload, specs) {
+  const problems = [];
+  for (const [scope, key, kind] of specs) {
+    for (const [node, prefix] of resolveScope(payload, scope)) {
+      if (!(key in node) || node[key] === null || node[key] === undefined) continue;
+      const value = node[key];
+      const path = `${prefix}${key}`;
+      if (kind === "object" && (typeof value !== "object" || Array.isArray(value))) {
+        problems.push(`${path} must be an object, got ${typeName(value)}`);
+      } else if (kind.startsWith("array")) {
+        if (!Array.isArray(value)) {
+          problems.push(`${path} must be an array, got ${typeName(value)}`);
+        } else if (kind === "array_nonempty" && value.length === 0) {
+          problems.push(`${path} must not be empty`);
+        }
+      }
+    }
+  }
+  return problems;
+}
+
 function isAbsent(value) {
   return value === undefined || value === null || value === "";
 }
@@ -189,7 +230,9 @@ const asProblems = (missing) => missing.map((f) => `missing required field ${f}`
 
 /** Return the problems with a Create Quote payload. */
 function validateQuotePayload(payload) {
-  return asProblems(collectMissing(payload, QUOTE_REQUIRED));
+  return asProblems(collectMissing(payload, QUOTE_REQUIRED)).concat(
+    checkShapes(payload, QUOTE_SHAPES)
+  );
 }
 
 /**
@@ -204,7 +247,9 @@ function validateOrderPayload(payload) {
   const rules = { ...ORDER_REQUIRED };
   const services = payload.seel_services;
   if (!services || !Array.isArray(services)) delete rules["seel_services[]"];
-  const problems = asProblems(collectMissing(payload, rules));
+  const problems = asProblems(collectMissing(payload, rules)).concat(
+    checkShapes(payload, ORDER_SHAPES)
+  );
 
   // Create Order has no top-level quote_id. Sending one is the classic
   // attach mistake: the API returns 200 with seel_services: null and no
@@ -215,18 +260,14 @@ function validateOrderPayload(payload) {
         "a top-level quote_id is ignored and the order attaches no coverage"
     );
   }
-  if (services !== undefined && services !== null && !Array.isArray(services)) {
-    problems.push(
-      `seel_services must be an array, got ${typeof services} - ` +
-        "an object is rejected by the parser with a 500"
-    );
-  }
   return problems;
 }
 
 /** Return the problems with a Create Merchant payload. */
 function validateMerchantPayload(payload) {
-  return asProblems(collectMissing(payload, MERCHANT_REQUIRED));
+  return asProblems(collectMissing(payload, MERCHANT_REQUIRED)).concat(
+    checkShapes(payload, MERCHANT_SHAPES)
+  );
 }
 
 class SeelClient {

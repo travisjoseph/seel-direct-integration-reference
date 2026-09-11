@@ -316,6 +316,60 @@ fn collect_missing(payload: &Value, rules: &[(&str, &[&str])]) -> Vec<String> {
     missing
 }
 
+/// Shape expectations, checked alongside presence. A scalar where an
+/// object belongs is the archetypal payload mistake, and without this the
+/// nested rules silently skip it: `resolve_scope` only descends into
+/// objects, so `{"customer": "nope"}` would report no problems at all.
+///
+/// Each entry is (parent scope, key, kind).
+const QUOTE_SHAPES: &[(&str, &str, &str)] = &[
+    ("", "customer", "object"),
+    ("", "shipping_address", "object"),
+    ("", "line_items", "array_nonempty"),
+    ("line_items[]", "shipping_origin", "object"),
+];
+const ORDER_EXTRA_SHAPES: &[(&str, &str, &str)] = &[("", "seel_services", "array")];
+const MERCHANT_SHAPES: &[(&str, &str, &str)] = &[("", "seel_services", "array_nonempty")];
+
+/// One vocabulary for type names across all four ports, so the same
+/// mistake reads the same way whichever one a partner runs.
+fn type_name(value: &Value) -> &'static str {
+    match value {
+        Value::Object(_) => "object",
+        Value::Array(_) => "array",
+        Value::String(_) => "string",
+        Value::Bool(_) => "boolean",
+        Value::Number(_) => "number",
+        Value::Null => "null",
+    }
+}
+
+fn check_shapes(payload: &Value, specs: &[(&str, &str, &str)]) -> Vec<String> {
+    let mut problems = Vec::new();
+    for (scope, key, kind) in specs {
+        for (node, prefix) in resolve_scope(payload, scope) {
+            let Some(value) = node.get(key) else { continue };
+            if value.is_null() {
+                continue; // absence is the required-field check's job
+            }
+            let path = format!("{prefix}{key}");
+            if *kind == "object" && !value.is_object() {
+                problems.push(format!("{path} must be an object, got {}", type_name(value)));
+            } else if kind.starts_with("array") {
+                match value.as_array() {
+                    None => problems
+                        .push(format!("{path} must be an array, got {}", type_name(value))),
+                    Some(items) if *kind == "array_nonempty" && items.is_empty() => {
+                        problems.push(format!("{path} must not be empty"))
+                    }
+                    Some(_) => {}
+                }
+            }
+        }
+    }
+    problems
+}
+
 fn as_problems(missing: Vec<String>) -> Vec<String> {
     missing
         .into_iter()
@@ -325,7 +379,9 @@ fn as_problems(missing: Vec<String>) -> Vec<String> {
 
 /// Return the problems with a Create Quote payload.
 pub fn validate_quote_payload(payload: &Value) -> Vec<String> {
-    as_problems(collect_missing(payload, QUOTE_REQUIRED))
+    let mut problems = as_problems(collect_missing(payload, QUOTE_REQUIRED));
+    problems.extend(check_shapes(payload, QUOTE_SHAPES));
+    problems
 }
 
 /// Return the problems with a Create Order payload.
@@ -342,6 +398,8 @@ pub fn validate_order_payload(payload: &Value) -> Vec<String> {
         rules.extend_from_slice(ORDER_SERVICE_REQUIRED);
     }
     let mut problems = as_problems(collect_missing(payload, &rules));
+    problems.extend(check_shapes(payload, QUOTE_SHAPES));
+    problems.extend(check_shapes(payload, ORDER_EXTRA_SHAPES));
 
     // Create Order has no top-level quote_id. Sending one is the classic
     // attach mistake: the API returns 200 with seel_services: null and no
@@ -353,21 +411,14 @@ pub fn validate_order_payload(payload: &Value) -> Vec<String> {
                 .to_string(),
         );
     }
-    if let Some(value) = services {
-        if !value.is_null() && !value.is_array() {
-            problems.push(
-                "seel_services must be an array - an object is rejected by the parser \
-                 with a 500"
-                    .to_string(),
-            );
-        }
-    }
     problems
 }
 
 /// Return the problems with a Create Merchant payload.
 pub fn validate_merchant_payload(payload: &Value) -> Vec<String> {
-    as_problems(collect_missing(payload, MERCHANT_REQUIRED))
+    let mut problems = as_problems(collect_missing(payload, MERCHANT_REQUIRED));
+    problems.extend(check_shapes(payload, MERCHANT_SHAPES));
+    problems
 }
 
 pub struct SeelClient {
@@ -789,6 +840,42 @@ mod tests {
         let mut with_empty = base.clone();
         with_empty["seel_services"][0]["coverages"] = json!([]);
         assert!(validate_merchant_payload(&with_empty).is_empty());
+    }
+
+    /// Runs the shared validation cases against this port.
+    ///
+    /// The cases live in `server/validation-cases.json` and are read by the
+    /// test suite in every language port. They exist to catch drift: the
+    /// ports must make the same accept/reject decision and report the same
+    /// field paths, and four hand-written suites would encode divergence
+    /// rather than catch it.
+    #[test]
+    fn shared_validation_cases() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../validation-cases.json");
+        let raw = std::fs::read_to_string(path).expect("read validation-cases.json");
+        let doc: Value = serde_json::from_str(&raw).expect("parse validation-cases.json");
+        let cases = doc["cases"].as_array().expect("cases array");
+        assert!(!cases.is_empty(), "fixture is empty");
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap_or("<unnamed>");
+            let payload = &case["payload"];
+            let problems = match case["operation"].as_str() {
+                Some("quote") => validate_quote_payload(payload),
+                Some("order") => validate_order_payload(payload),
+                Some("merchant") => validate_merchant_payload(payload),
+                other => panic!("{name}: unknown operation {other:?}"),
+            };
+            let joined = problems.join("; ");
+            if case["expect_clean"].as_bool().unwrap_or(false) {
+                assert!(problems.is_empty(), "{name}: expected no problems, got {joined}");
+            } else {
+                for fragment in case["expect_contains"].as_array().expect("expect_contains") {
+                    let fragment = fragment.as_str().expect("fragment is a string");
+                    assert!(joined.contains(fragment), "{name}: expected {fragment:?} in {joined:?}");
+                }
+            }
+        }
     }
 
     #[test]
