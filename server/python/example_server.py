@@ -47,7 +47,14 @@ import re
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import unquote
 
-from seel_client import SANDBOX_BASE_URL, SeelAPIError, SeelClient, verify_webhook_signature
+from seel_client import (
+    SANDBOX_BASE_URL,
+    SeelAPIError,
+    SeelClient,
+    SeelContractNotMintedError,
+    SeelValidationError,
+    verify_webhook_signature,
+)
 
 PORT = int(os.environ.get("PORT", "8787"))
 API_KEY = os.environ.get("SEEL_API_KEY", "")
@@ -61,13 +68,33 @@ QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
 
 # Route patterns, mirroring Seel's own paths under an /api/seel prefix.
-QUOTE_PATH = "/api/seel/quote"
+# Routes mirror Seel's real paths, prefix included, so a caller already
+# written against Seel moves onto a platform by changing the base URL and
+# nothing else. The clients build "<base>/v1/ecommerce/...", so anything
+# shorter would 404 every call.
+QUOTE_PATH = "/v1/ecommerce/quotes"
 WEBHOOK_PATH = "/webhooks/seel"
-ORDERS_PATH = re.compile(r"^/api/seel/orders$")
-ORDER_PATH = re.compile(r"^/api/seel/orders/([^/]+)$")
-ORDER_CANCEL_PATH = re.compile(r"^/api/seel/orders/([^/]+)/cancel$")
-FULFILLMENTS_PATH = re.compile(r"^/api/seel/orders/([^/]+)/fulfillments$")
-FULFILLMENT_PATH = re.compile(r"^/api/seel/orders/([^/]+)/fulfillments/([^/]+)$")
+ORDERS_PATH = re.compile(r"^/v1/ecommerce/orders$")
+ORDER_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)$")
+ORDER_CANCEL_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/cancel$")
+FULFILLMENTS_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/fulfillments$")
+FULFILLMENT_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/fulfillments/([^/]+)$")
+
+
+def safe_path_param(raw: str):
+    """Percent-decode one path segment, or return None if it escapes.
+
+    A segment arrives encoded and is interpolated into the upstream URL, so
+    a decoded "/" would reach a different endpoint than the route implies:
+    "orders/ORD1%2Fcancel" matches the update-order route and would perform
+    a cancel. Control characters are refused for the same reason. With one
+    API key shared across retailers this is a privilege boundary, not a
+    cosmetic check.
+    """
+    decoded = unquote(raw)
+    if "/" in decoded or any(ord(c) < 0x20 or ord(c) == 0x7F for c in decoded):
+        return None
+    return decoded
 
 
 def authenticate_caller(headers) -> bool:
@@ -143,21 +170,42 @@ class Handler(BaseHTTPRequestHandler):
         return self.rfile.read(length) if length > 0 else b""
 
     def _forward(self, label: str, call) -> None:
-        """Call Seel and mirror the result back to the caller."""
+        """Call Seel and mirror the result back to the caller.
+
+        Each failure has to stay distinguishable. Collapsing them into one
+        502 would report a payload that never left this process as an
+        upstream outage, and would invite a retry on an order Seel has
+        already accepted.
+        """
         try:
             self._respond(200, call())
+        except SeelValidationError as exc:
+            # The request never left this process, so this is the caller's
+            # bug. Hand back every problem at once.
+            self._respond(400, {"error": str(exc), "problems": exc.problems})
+        except SeelContractNotMintedError as exc:
+            # Seel accepted the order and minted no contract. 502 would be
+            # wrong twice over: the upstream call succeeded, and a retry
+            # would duplicate the order.
+            print(f"[proxy] {label}: {exc}")
+            self._respond(409, {"error": str(exc), "seel_response": exc.response})
         except SeelAPIError as exc:
             # Forward Seel's status and error body - it names the
             # offending field.
             self._respond(exc.status, exc.body if isinstance(exc.body, dict) else {"error": str(exc)})
-        except Exception:
+        except Exception as exc:
+            # Log before answering: a bare 502 leaves the operator unable to
+            # tell a timeout from a bug in this handler.
+            print(f"[proxy] {label} failed: {exc!r}")
             self._respond(502, {"error": f"upstream {label} request failed"})
 
     def _json_body(self, body: bytes):
         """Parse a JSON object body, or answer 400 and return None."""
         try:
             params = json.loads(body)
-        except json.JSONDecodeError:
+        except (UnicodeDecodeError, json.JSONDecodeError):
+            # UnicodeDecodeError is a ValueError but not a JSONDecodeError,
+            # and would otherwise escape as an HTML 500.
             self._respond(400, {"error": "request body must be JSON"})
             return None
         if not isinstance(params, dict):
@@ -170,14 +218,20 @@ class Handler(BaseHTTPRequestHandler):
         # than letting BaseHTTPRequestHandler emit its HTML 501 page.
         self._respond(404, {"error": "not found"})
 
+    # Every other verb answers the same way, for the same reason.
+    do_PUT = do_PATCH = do_DELETE = do_HEAD = do_GET
+
     def do_POST(self):
         body = self._read_body()
+        # Match on the path only. Ports that keep the query string here
+        # would 404 a request the others route.
+        path = self.path.split("?", 1)[0]
 
-        if self.path != WEBHOOK_PATH and not authenticate_caller(self.headers):
+        if path != WEBHOOK_PATH and not authenticate_caller(self.headers):
             self._respond(401, {"error": "unauthorized"})
             return
 
-        if self.path == QUOTE_PATH:
+        if path == QUOTE_PATH:
             params = self._json_body(body)
             if params is None:
                 return
@@ -192,7 +246,7 @@ class Handler(BaseHTTPRequestHandler):
         # Sync every order, opted in or not. On opt-in the body carries
         # seel_services with the quote_id and price, which mints the
         # contract and fires contract.created.
-        if ORDERS_PATH.match(self.path):
+        if ORDERS_PATH.match(path):
             params = self._json_body(body)
             if params is None:
                 return
@@ -203,15 +257,22 @@ class Handler(BaseHTTPRequestHandler):
             return
 
         # Cancel carries no body.
-        match = ORDER_CANCEL_PATH.match(self.path)
+        match = ORDER_CANCEL_PATH.match(path)
         if match:
-            order_id = unquote(match.group(1))
+            order_id = safe_path_param(match.group(1))
+            if order_id is None:
+                self._respond(400, {"error": "invalid order id in path"})
+                return
             self._forward("order cancel", lambda: client.cancel_order(order_id))
             return
 
-        match = FULFILLMENT_PATH.match(self.path)
+        match = FULFILLMENT_PATH.match(path)
         if match:
-            order_id, fulfillment_id = unquote(match.group(1)), unquote(match.group(2))
+            order_id = safe_path_param(match.group(1))
+            fulfillment_id = safe_path_param(match.group(2))
+            if order_id is None or fulfillment_id is None:
+                self._respond(400, {"error": "invalid id in path"})
+                return
             params = self._json_body(body)
             if params is None:
                 return
@@ -221,27 +282,35 @@ class Handler(BaseHTTPRequestHandler):
             )
             return
 
-        match = FULFILLMENTS_PATH.match(self.path)
+        match = FULFILLMENTS_PATH.match(path)
         if match:
-            order_id = unquote(match.group(1))
+            order_id = safe_path_param(match.group(1))
+            if order_id is None:
+                self._respond(400, {"error": "invalid order id in path"})
+                return
             params = self._json_body(body)
             if params is None:
                 return
             self._forward("fulfillment", lambda: client.create_fulfillment(order_id, params))
             return
 
-        match = ORDER_PATH.match(self.path)
+        match = ORDER_PATH.match(path)
         if match:
-            order_id = unquote(match.group(1))
+            order_id = safe_path_param(match.group(1))
+            if order_id is None:
+                self._respond(400, {"error": "invalid order id in path"})
+                return
             params = self._json_body(body)
             if params is None:
                 return
             self._forward("order update", lambda: client.update_order(order_id, params))
             return
 
-        if self.path == WEBHOOK_PATH:
+        if path == WEBHOOK_PATH:
             signature = self.headers.get("X-Seel-Hmac-SHA256", "")
-            if not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
+            # An empty secret is a valid HMAC key, so without this check an
+            # unconfigured server authenticates anyone who signs with "".
+            if not WEBHOOK_SECRET or not verify_webhook_signature(body, signature, WEBHOOK_SECRET):
                 self._respond(401, {"error": "invalid signature"})
                 return
             # ACK and flush before doing any work: Seel retries anything not

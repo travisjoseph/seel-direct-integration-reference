@@ -24,7 +24,20 @@ import hashlib
 import hmac
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
+
+def _path_param(value: str) -> str:
+    """Percent-encode one path segment.
+
+    Ids arrive from callers and go straight into the upstream URL. Without
+    this, an id containing "/" (or "%2F", which decodes to one) reaches a
+    different endpoint than the method name implies - an update_order call
+    with order_id "x/cancel" would cancel instead. safe="" so "/" is encoded
+    too; the default would leave it.
+    """
+    return urllib.parse.quote(str(value), safe="")
+
 
 SANDBOX_BASE_URL = "https://api-test.seel.com"
 PRODUCTION_BASE_URL = "https://api.seel.com"
@@ -266,7 +279,7 @@ class SeelClient:
     def update_merchant(self, merchant_id: str, payload: dict) -> dict:
         """Sync changed protection settings, or disable the program for a
         retailer - include the reason when disabling."""
-        return self._request("POST", f"/ecommerce/merchants/{merchant_id}", payload)
+        return self._request("POST", f"/ecommerce/merchants/{_path_param(merchant_id)}", payload)
 
     # -- Quotes -------------------------------------------------------------
 
@@ -284,7 +297,7 @@ class SeelClient:
         return self._request("POST", "/ecommerce/quotes", payload)
 
     def get_quote(self, quote_id: str) -> dict:
-        return self._request("GET", f"/ecommerce/quotes/{quote_id}")
+        return self._request("GET", f"/ecommerce/quotes/{_path_param(quote_id)}")
 
     # -- Orders -------------------------------------------------------------
 
@@ -338,24 +351,26 @@ class SeelClient:
 
     def update_order(self, order_id: str, payload: dict) -> dict:
         """Sync order changes: line item removed, shipping address updated."""
-        return self._request("POST", f"/ecommerce/orders/{order_id}", payload)
+        return self._request("POST", f"/ecommerce/orders/{_path_param(order_id)}", payload)
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel a synced order; its WFP coverage cancels with it.
         Refunding the WFP fee and tax to the shopper is the platform's job -
         see Cancellation in the README."""
-        return self._request("POST", f"/ecommerce/orders/{order_id}/cancel")
+        return self._request("POST", f"/ecommerce/orders/{_path_param(order_id)}/cancel")
 
     # -- Fulfillments -------------------------------------------------------
 
     def create_fulfillment(self, order_id: str, payload: dict) -> dict:
         """Send tracking number + carrier when the order ships."""
-        return self._request("POST", f"/ecommerce/orders/{order_id}/fulfillments", payload)
+        return self._request("POST", f"/ecommerce/orders/{_path_param(order_id)}/fulfillments", payload)
 
     def update_fulfillment(self, order_id: str, fulfillment_id: str, payload: dict) -> dict:
         """Update tracking/delivery status after fulfillment."""
         return self._request(
-            "POST", f"/ecommerce/orders/{order_id}/fulfillments/{fulfillment_id}", payload
+            "POST",
+            f"/ecommerce/orders/{_path_param(order_id)}/fulfillments/{_path_param(fulfillment_id)}",
+            payload
         )
 
     # -- Claims -------------------------------------------------------------
@@ -375,15 +390,15 @@ class SeelClient:
         shopper-facing details on rejections. Claim items and amounts cannot
         be changed after creation. Seel records the outcome and fires
         claim.accepted or claim.rejected."""
-        return self._request("POST", f"/ecommerce/claims/{claim_id}", payload)
+        return self._request("POST", f"/ecommerce/claims/{_path_param(claim_id)}", payload)
 
     def get_claim(self, claim_id: str) -> dict:
-        return self._request("GET", f"/ecommerce/claims/{claim_id}")
+        return self._request("GET", f"/ecommerce/claims/{_path_param(claim_id)}")
 
     # -- Lookups (ad hoc; day-to-day state comes via webhooks) ---------------
 
     def get_order(self, order_id: str) -> dict:
-        return self._request("GET", f"/ecommerce/orders/{order_id}")
+        return self._request("GET", f"/ecommerce/orders/{_path_param(order_id)}")
 
     def list_contracts(self, query: str = "") -> dict:
         return self._request("GET", "/ecommerce/contracts" + (f"?{query}" if query else ""))
