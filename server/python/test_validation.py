@@ -35,6 +35,16 @@ VALIDATORS = {
 
 
 class SharedValidationCases(unittest.TestCase):
+    def test_fixture_is_populated(self):
+        """The fixture is the single point of failure for cross-port drift,
+        so an emptied or defanged one has to fail rather than pass green."""
+        self.assertTrue(CASES and CONTRACT_CASES and UNCOVERED, "fixture is empty")
+        for case in CASES:
+            if not case.get("expect_clean"):
+                self.assertTrue(
+                    case.get("expect_contains"), f"{case['name']}: expect_contains is empty"
+                )
+
     def test_shared_cases(self):
         for case in CASES:
             with self.subTest(case=case["name"]):
