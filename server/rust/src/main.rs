@@ -2,15 +2,15 @@
 //!
 //! Routes:
 //! ```text
-//! POST /api/seel/quote  - browser quote proxy: attaches the server-side API
+//! POST /v1/ecommerce/quotes  - browser quote proxy: attaches the server-side API
 //!                         key and forwards to Seel's Quote API (the widget
 //!                         never sees the key)
 //!
-//! POST /api/seel/orders                              - create order
-//! POST /api/seel/orders/{order_id}                   - update order
-//! POST /api/seel/orders/{order_id}/cancel            - cancel order
-//! POST /api/seel/orders/{order_id}/fulfillments      - create fulfillment
-//! POST /api/seel/orders/{order_id}/fulfillments/{id} - update fulfillment
+//! POST /v1/ecommerce/orders                              - create order
+//! POST /v1/ecommerce/orders/{order_id}                   - update order
+//! POST /v1/ecommerce/orders/{order_id}/cancel            - cancel order
+//! POST /v1/ecommerce/orders/{order_id}/fulfillments      - create fulfillment
+//! POST /v1/ecommerce/orders/{order_id}/fulfillments/{id} - update fulfillment
 //!
 //! POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
 //!                         events: verifies HMAC, ACKs 200 fast, then hands
@@ -30,8 +30,11 @@
 //!   retailers point at the platform instead of at Seel, and the platform
 //!   resolves which merchant each request belongs to. Retailers hold no Seel
 //!   credentials at all. See [`authenticate_caller`] and
-//!   [`resolve_merchant_id`] - those two are the whole of what a platform
-//!   must replace.
+//!   [`resolve_merchant_id`], which are where a platform starts. They are
+//!   not the whole job: `order_id` comes off the URL and is never checked
+//!   against the caller, so nothing here stops one retailer touching
+//!   another's order. That mapping belongs to the platform - see the
+//!   README.
 //!
 //! Run:
 //! ```text
@@ -42,7 +45,7 @@
 //! doesn't serve the demo page:
 //! 1. run this server
 //! 2. in widget/demo.html, replace the mock quoteFetcher with
-//!    configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+//!    configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 
 use std::sync::Arc;
 use std::thread;
@@ -130,8 +133,9 @@ fn read_body(request: &mut Request) -> Option<Vec<u8>> {
 /// A platform MUST replace this. Retailers authenticate to the platform with
 /// platform credentials - they never receive a Seel API key, because one key
 /// covers every retailer on the platform and would let any holder act as any
-/// other. Return the caller's identity from here and pass it to
-/// [`resolve_merchant_id`] so a retailer can only ever touch its own orders.
+/// other. A real implementation returns the caller's identity rather than
+/// a bool, and [`resolve_merchant_id`] takes it - changing both signatures
+/// is part of the work.
 fn authenticate_caller(_request: &Request) -> bool {
     true
 }
@@ -146,6 +150,10 @@ fn authenticate_caller(_request: &Request) -> bool {
 /// from the authenticated caller instead. Deriving it from the caller rather
 /// than trusting the request body is what stops one retailer quoting or
 /// ordering against another's merchant ID.
+///
+/// The body fallback below is a demo default so the unconfigured server
+/// still runs. It is not safe on a real platform: any caller can name any
+/// merchant. Replace it before anyone but you can reach this.
 fn resolve_merchant_id(config: &Config, params: &Value) -> String {
     if !config.merchant_id.is_empty() {
         return config.merchant_id.clone();

@@ -27,15 +27,17 @@ server/             The same backend in four languages - pick yours. Each
                     has a client for every /v1/ecommerce/* endpoint and an
                     example server: a quote proxy that keeps the API key off
                     the browser, order and fulfillment routes, and a webhook
-                    endpoint that checks HMAC signatures. Payloads are
-                    validated before sending - see Validation rules.
+                    endpoint that checks HMAC signatures. Python, Node and
+                    Rust validate payloads before sending; Java cannot, for
+                    the reason below.
   python/           Stdlib only.        python3 example_server.py
   node/             Node 18+ built-ins. node example-server.js
   rust/             Small crate.        cargo run
   java/             JDK 17+ only.       javac *.java && java ExampleServer
-                    Validation lives in SeelValidation.java here, not in the
-                    client - this port has no JSON parser to inspect a
-                    payload with.
+                    Validation lives in SeelValidation.java, not in the
+                    client, and the example server does not call it: this
+                    port works in raw JSON strings and has no parser to
+                    inspect a payload with. Validate before you serialize.
 ```
 
 Python is the primary copy; the other three are ports of it.
@@ -82,21 +84,30 @@ storefront widget ──▶ platform proxy ──▶ Seel
 retailer backend  ──▶ platform proxy ──▶ Seel
 ```
 
-Because the proxy routes mirror Seel's own path shape, a retailer already
-written against Seel's API moves onto a platform by changing the base URL
-and nothing else.
+The proxy serves Seel's own paths, prefix included, so a retailer already
+written against Seel moves onto a platform by pointing `SEEL_BASE_URL` at
+it and changing nothing else. The clients build `<base>/v1/ecommerce/...`,
+which is exactly what the proxy listens for.
 
-Two functions in each example server are the whole of what a platform must
-replace:
+Two functions in each example server are where a platform starts:
 
 | Function | Replace it with |
 |---|---|
-| `authenticate_caller` | Your own retailer authentication. Never hand a retailer the Seel API key - one key covers every retailer on the platform, so any holder could act as any other. |
-| `resolve_merchant_id` | A lookup from the authenticated caller to that retailer's merchant ID. Deriving it from the caller rather than trusting the request body is what stops one retailer ordering against another's merchant ID. |
+| `authenticate_caller` | Your own retailer authentication. It returns true for everyone here, which is only safe because this holds a sandbox key and listens on localhost. Never hand a retailer the Seel API key - one key covers every retailer on the platform, so any holder could act as any other. |
+| `resolve_merchant_id` | A lookup from the authenticated caller to that retailer's merchant ID. It falls back to the request body here, which is a demo default and not safe on a real platform: derive the merchant from the authenticated caller instead. |
 
 Leave `SEEL_MERCHANT_ID` unset when running as a platform - it exists to
 stamp a single merchant onto every request, which is the single-retailer
 case.
+
+**Those two are not the whole job.** `order_id` comes off the URL and is
+never checked against the caller, so nothing here stops one retailer
+cancelling another's order by knowing its id. A platform needs its own
+record of which retailer owns which order, and has to check it before
+proxying. That mapping belongs to the platform, not to Seel, so this
+reference does not invent one. This is a reference implementation, not a
+hardened gateway - read it for the request shapes and the lifecycle, and
+bring your own tenancy model.
 
 ## Proxy routes
 
@@ -104,16 +115,27 @@ The example server answers these. All are POST.
 
 | Route | Calls |
 |---|---|
-| `/api/seel/quote` | `create_quote` |
-| `/api/seel/orders` | `create_order` |
-| `/api/seel/orders/{order_id}` | `update_order` |
-| `/api/seel/orders/{order_id}/cancel` | `cancel_order` |
-| `/api/seel/orders/{order_id}/fulfillments` | `create_fulfillment` |
-| `/api/seel/orders/{order_id}/fulfillments/{fulfillment_id}` | `update_fulfillment` |
+| `/v1/ecommerce/quotes` | `create_quote` |
+| `/v1/ecommerce/orders` | `create_order` |
+| `/v1/ecommerce/orders/{order_id}` | `update_order` |
+| `/v1/ecommerce/orders/{order_id}/cancel` | `cancel_order` |
+| `/v1/ecommerce/orders/{order_id}/fulfillments` | `create_fulfillment` |
+| `/v1/ecommerce/orders/{order_id}/fulfillments/{fulfillment_id}` | `update_fulfillment` |
 | `/webhooks/seel` | HMAC-verified webhook receiver |
 
-Seel's status and error body are passed straight back through, so the
-caller sees the field Seel objected to. An unreachable Seel answers 502.
+Responses are deliberately distinguishable, because collapsing them hides
+the difference between your bug, Seel's answer, and a network problem:
+
+| Status | Means |
+|---|---|
+| Seel's own status | Seel rejected it. Its error body is passed straight through, so you see the field it objected to |
+| `400` | This proxy rejected it before sending. The body carries a `problems` array listing every fault at once |
+| `409` | Seel accepted the order and minted no contract. The order exists upstream, so do not retry it |
+| `502` | Seel could not be reached |
+
+An id that would escape its path segment is refused with a `400` rather
+than forwarded: a decoded `/` would reach a different endpoint than the
+route names.
 
 Merchant onboarding (`create_merchant`, `create_orders_batch`) has no
 route: it runs from your onboarding flow, not from a retailer request.
@@ -167,7 +189,7 @@ Against sandbox, two steps - the example server doesn't serve the demo page:
 cd server/python   # or server/node, server/rust, server/java
 SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... SEEL_MERCHANT_ID=... SEEL_QUOTE_TYPE=... python3 example_server.py
 # then, in widget/demo.html, replace the mock quoteFetcher with
-#   configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+#   configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 ```
 
 Credentials live in environment variables. Never commit them.
@@ -179,9 +201,11 @@ Credentials live in environment variables. Never commit them.
 | Sandbox | `https://api-test.seel.com` |
 | Production | `https://api.seel.com` |
 
-Nothing in this repo hardcodes a host. The base URL comes from
-`SEEL_BASE_URL`, or from the constructor if you pass one, so moving between
-environments is a config change and never a code change.
+Moving between environments is a config change, never a code change: the
+base URL comes from `SEEL_BASE_URL`, or from the constructor if you pass
+one. The two hosts appear in each client as the `SANDBOX_BASE_URL` and
+`PRODUCTION_BASE_URL` constants. Sandbox is the constructor default, so a
+client built without a base URL talks to sandbox rather than failing.
 
 **Four values are environment-scoped, not one.** Swapping only the URL will
 fail on the first call:
@@ -219,17 +243,45 @@ environments;
 the latest. The key is a server-side secret: browser code goes through the
 proxy, never straight to Seel.
 
+## Tests
+
+Every port runs the same cases, from `server/validation-cases.json`. They
+exist to catch drift between the ports rather than to prove any one of them
+correct: the four must make the same accept/reject decision and report the
+same field paths. Each uses what its runtime already ships, so there is
+nothing to install.
+
+```bash
+python3 -m unittest discover server/python
+node --test server/node
+cd server/rust && cargo test
+cd server/java && javac *.java && java SeelValidationTest
+```
+
+Rust additionally covers route matching and path-parameter decoding, which
+are per-port code rather than shared behaviour. If you change a required
+field, change it in `validation-cases.json` too, or three ports will
+disagree with the fourth in silence.
+
 ## Validation rules
 
 Measured against sandbox on 2026-09-10 by removing one field per request
 from a known-good payload and recording the response, for Create Quote,
 Create Order and Create Merchant.
 
-**Requiredness is per-account.** Seel validates a strict default profile and
-relaxes individual fields for some accounts, so your account may accept less
-than this. The sets below are the strict profile: sending them is never
-wrong. That is also why the clients treat validation as advisory and let you
-switch it off.
+This supersedes an earlier version of this section, which listed
+`retail_price`, `category_3`, `category_4` and `shipping_origin.state` as
+required. They are not. If you integrated against the older text you are
+sending more than you need, which is harmless, but re-read the table below
+before trimming anything else.
+
+**Treat this as the starting point, not a fixed contract.** A newly
+provisioned account behaves as described here. As an integration develops,
+Seel's implementation team works out which fields a given merchant journey
+can actually supply and eases the validation accordingly, so an established
+account may accept less than this. Sending the full set is never wrong,
+which is why these are safe defaults, and it is why the clients treat
+validation as advisory and let you switch it off rather than enforcing it.
 
 ### Required on Create Quote and Create Order
 
@@ -255,10 +307,15 @@ Confirmed optional, despite being easy to assume otherwise: `cart_id`,
 `price + sales_tax - allocated_discounts` must equal `final_price`.
 
 Each program has its own quote `type`, provided with your credentials. Any
-other type is rejected with an error naming the allowed ones. Eligibility is
-configured per program and market: if a market you expect comes back
-`rejected`, ask your Seel contact. US/USD payloads work end to end in
-sandbox.
+other type is rejected with an error naming the allowed ones.
+
+Eligibility is configured per merchant, per market and per currency, and an
+unconfigured market **does not error**. The quote returns `accepted` with
+`price: 0.0` and the coverage simply absent from `coverages[]`, which reads
+as a working integration until someone notices no offer was ever shown. So
+check `coverages[]` is non-empty before treating a quote as an offer, and
+if a market you expect comes back empty, ask your Seel contact whether
+rates are configured for that currency.
 
 ### Required on Create Merchant
 
@@ -273,11 +330,12 @@ that this is a server-side null-check rather than a data requirement. The
 clients check for it before sending so you get a readable error instead of
 a 500.
 
-### Three ways Create Order fails while returning 200
+### Three ways an attach fails, two of them silently
 
 A failed attach is reported as `contract_id: null` on an otherwise
 successful response. There is no error status code, so an integration can
-look healthy while covering nothing.
+look healthy while covering nothing. The clients check the response for a
+real `contract_id` for exactly this reason.
 
 | Mistake | What you get back |
 |---|---|
@@ -306,17 +364,15 @@ does not: a failed attach really is a failure, Seel just reports it as
 off the failure detection.
 
 ```python
-SeelClient(api_key, base_url, validate=False)                  # Python
+SeelClient(api_key, base_url, validate=False, check_contract=True)   # Python
 ```
 ```javascript
-new SeelClient(apiKey, baseUrl, apiVersion, timeoutMs, false)  // Node
+new SeelClient(apiKey, baseUrl, apiVersion, timeoutMs, false, true)  // Node
 ```
 ```rust
-SeelClient::new(&key, &url).without_validation()               // Rust
+SeelClient::new(&key, &url).without_validation()                     // Rust
+SeelClient::new(&key, &url).without_contract_check()                 // Rust
 ```
-
-Rust has `.without_contract_check()` as well; Python and Node take
-`check_contract` / `checkContract` alongside `validate`.
 
 The Java client works in raw JSON strings and has no parser, so it cannot do
 either automatically. Use `SeelValidation.validateQuote` / `validateOrder` /

@@ -197,7 +197,7 @@ impl fmt::Display for SeelError {
             SeelError::Io(err) => write!(f, "response read error: {err}"),
             SeelError::Validation { operation, problems } => write!(
                 f,
-                "{operation}: {}. Build the client with validation disabled to skip these checks.",
+                "{operation}: {}. Call .without_validation() on the client to skip these checks.",
                 problems.join("; ")
             ),
             SeelError::ContractNotMinted { detail, .. } => {
@@ -213,11 +213,13 @@ impl std::error::Error for SeelError {}
 // one field per request from a known-good payload and recording the
 // response.
 //
-// Requiredness is PER-ACCOUNT. Seel validates a strict default profile and
-// relaxes individual fields for some accounts, so an account may
-// legitimately accept less than this. These sets are the strict profile:
-// sending them is never wrong, but rejecting a payload locally could be.
-// That is why validation is advisory and can be turned off.
+// Treat these as a starting point, not a fixed contract. A newly
+// provisioned account behaves this way; as an integration develops, Seel's
+// implementation team works out which fields a merchant journey can
+// actually supply and eases the validation accordingly, so an established
+// account may accept less. Sending the full set is never wrong, but
+// rejecting a payload locally could be, which is why validation is
+// advisory and can be turned off.
 //
 // A "[]" suffix means the rule applies to every element of that array.
 const LINE_ITEM_REQUIRED: &[&str] = &[

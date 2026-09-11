@@ -93,11 +93,13 @@ class SeelContractNotMintedError extends Error {
 // one field per request from a known-good payload and recording the
 // response.
 //
-// Requiredness is PER-ACCOUNT. Seel validates a strict default profile and
-// relaxes individual fields for some accounts, so an account may
-// legitimately accept less than this. These sets are the strict profile:
-// sending them is never wrong, but rejecting a payload locally could be.
-// That is why validation is advisory and validate: false turns it off.
+// Treat these as a starting point, not a fixed contract. A newly
+// provisioned account behaves this way; as an integration develops, Seel's
+// implementation team works out which fields a merchant journey can
+// actually supply and eases the validation accordingly, so an established
+// account may accept less. Sending the full set is never wrong, but
+// rejecting a payload locally could be, which is why validation is
+// advisory and validate: false turns it off.
 //
 // A "[]" suffix means the rule applies to every element of that array.
 const LINE_ITEM_REQUIRED = [

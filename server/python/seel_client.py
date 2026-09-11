@@ -66,7 +66,6 @@ class SeelValidationError(Exception):
     def __init__(self, operation: str, problems: list[str]):
         self.operation = operation
         self.problems = problems
-        self.missing = problems  # backwards-compatible alias
         super().__init__(
             f"{operation}: {'; '.join(problems)}. "
             "Pass validate=False to the client to skip these checks."
@@ -89,11 +88,12 @@ class SeelContractNotMintedError(Exception):
 # Required-field sets, measured against sandbox on 2026-09-10 by removing one
 # field per request from a known-good payload and recording the response.
 #
-# Requiredness is PER-ACCOUNT. Seel validates a strict default profile and
-# relaxes individual fields for some accounts, so an account may legitimately
-# accept less than this. These sets are the strict profile: sending them is
-# never wrong, but rejecting a payload locally could be. That is why
-# validation is advisory and validate=False turns it off.
+# Treat these as a starting point, not a fixed contract. A newly provisioned
+# account behaves this way; as an integration develops, Seel's implementation
+# team works out which fields a merchant journey can actually supply and eases
+# the validation accordingly, so an established account may accept less.
+# Sending the full set is never wrong, but rejecting a payload locally could
+# be, which is why validation is advisory and validate=False turns it off.
 #
 # A "[]" suffix means the rule applies to every element of that array.
 _QUOTE_REQUIRED = {
@@ -178,7 +178,7 @@ def _check_shapes(payload: dict, specs: list) -> list:
 
 
 def _is_absent(value) -> bool:
-    """Missing means the key is absent, None, or an empty string.
+    """Is this value a non-answer? Key absence is handled by the caller.
 
     False and 0 are real values - is_default_on, requires_shipping and
     allocated_discounts all legitimately take them. An empty list is a real
@@ -366,8 +366,8 @@ class SeelClient:
     def _check_contract_minted(payload: dict, response: dict) -> None:
         """Fail loudly when an attach silently did not take.
 
-        A failed attach is contract_id: null on a 200, never a status code,
-        so nothing else in the stack will notice.
+        Every failed attach observed so far is contract_id: null on a 200
+        rather than a status code, so nothing else in the stack notices.
         """
         services = response.get("seel_services")
         if not services:

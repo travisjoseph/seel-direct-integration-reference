@@ -26,7 +26,7 @@
 
   var config = {
     // Backend proxy that forwards to Seel's Quote API with the server-side key.
-    quoteEndpoint: "/api/seel/quote",
+    quoteEndpoint: "/v1/ecommerce/quotes",
     // Override for testing: async function (params) -> quote response object.
     quoteFetcher: null,
   };
@@ -79,6 +79,7 @@
       currencySymbol: q.currency_symbol || q.currencySymbol,
       displayPrice: (q.display_amounts && q.display_amounts.price) || String(q.price),
       eligibleItems: q.eligible_items || [],
+      coverages: q.coverages || [],
       extraInfo: {
         displayWidgetText: extra.display_widget_text || copy.widget_text || [],
         optOutWarningText: extra.opt_out_warning_text || "",
@@ -91,6 +92,21 @@
       modalDetails: copy.modal_details_text || [],
       raw: q,
     };
+  }
+
+  /**
+   * Is this quote something to show the shopper?
+   *
+   * A quote can be "accepted" and still carry no coverage - an unpriced
+   * market returns price 0.0 with an empty coverages array rather than a
+   * rejection. Checking status alone would render a 0.00 offer.
+   */
+  function isOffer(quote) {
+    return (
+      quote.status === "accepted" &&
+      !quote.extraInfo.isWidgetHidden &&
+      quote.coverages.length > 0
+    );
   }
 
   function fire(handlers, quote) {
@@ -134,7 +150,10 @@
       console.warn("[SeelSDK] mounting div #" + MOUNT_ID + " not found");
       return;
     }
-    if (quote.status !== "accepted" || quote.extraInfo.isWidgetHidden) {
+    // An unconfigured market does not come back rejected: the quote is
+    // "accepted" with price 0 and coverages empty. Rendering that shows the
+    // shopper a free offer that covers nothing, so treat it as no offer.
+    if (!isOffer(quote)) {
       mount.innerHTML = "";
       return;
     }
@@ -207,7 +226,7 @@
         if (seq !== state.requestSeq) return state.quote; // superseded by a newer call
         var quote = normalizeQuote(resp);
         state.quote = quote;
-        var eligible = quote.status === "accepted" && !quote.extraInfo.isWidgetHidden;
+        var eligible = isOffer(quote);
         var checked = eligible && (state.userChose ? state.checked : !!quoteParams.is_default_on);
         render(quote, checked);
         setChecked(checked);

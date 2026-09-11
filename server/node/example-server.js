@@ -2,15 +2,15 @@
  * Example backend for the direct-integration path. Node stdlib only.
  *
  * Routes:
- *   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
+ *   POST /v1/ecommerce/quotes  - browser quote proxy: attaches the server-side API
  *                           key and forwards to Seel's Quote API (the widget
  *                           never sees the key)
  *
- *   POST /api/seel/orders                                - create order
- *   POST /api/seel/orders/{orderId}                      - update order
- *   POST /api/seel/orders/{orderId}/cancel               - cancel order
- *   POST /api/seel/orders/{orderId}/fulfillments         - create fulfillment
- *   POST /api/seel/orders/{orderId}/fulfillments/{fid}   - update fulfillment
+ *   POST /v1/ecommerce/orders                                - create order
+ *   POST /v1/ecommerce/orders/{orderId}                      - update order
+ *   POST /v1/ecommerce/orders/{orderId}/cancel               - cancel order
+ *   POST /v1/ecommerce/orders/{orderId}/fulfillments         - create fulfillment
+ *   POST /v1/ecommerce/orders/{orderId}/fulfillments/{fid}   - update fulfillment
  *
  *   POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
  *                           events: verifies HMAC, ACKs 200 fast, then hands
@@ -30,7 +30,10 @@
  *   retailers point at the platform instead of at Seel, and the platform
  *   resolves which merchant each request belongs to. Retailers hold no Seel
  *   credentials at all. See authenticateCaller() and resolveMerchantId()
- *   below - those two functions are the whole of what a platform must replace.
+ *   below, which are where a platform starts. They are not the whole job:
+ *   order_id comes off the URL and is never checked against the caller, so
+ *   nothing here stops one retailer touching another's order. That mapping
+ *   belongs to the platform - see the README.
  *
  * Run:
  *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... node example-server.js
@@ -39,7 +42,7 @@
  * doesn't serve the demo page:
  *   1. run this server
  *   2. in widget/demo.html, replace the mock quoteFetcher with
- *      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+ *      configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
  */
 
 "use strict";
@@ -66,7 +69,7 @@ const QUOTE_TYPE = process.env.SEEL_QUOTE_TYPE || "";
 
 const client = new SeelClient(API_KEY, BASE_URL);
 
-// Route patterns, mirroring Seel's own paths under an /api/seel prefix.
+// Route patterns, mirroring Seel's real paths, prefix included.
 // Routes mirror Seel's real paths, prefix included, so a caller already
 // written against Seel moves onto a platform by changing the base URL and
 // nothing else. The clients build "<base>/v1/ecommerce/...", so anything
@@ -114,8 +117,9 @@ function safePathParam(raw) {
  * A platform MUST replace this. Retailers authenticate to the platform with
  * platform credentials - they never receive a Seel API key, because one key
  * covers every retailer on the platform and would let any holder act as any
- * other. Return the caller's identity from here and pass it to
- * resolveMerchantId() so a retailer can only ever touch its own orders.
+ * other. A real implementation returns the caller's identity rather than a
+ * boolean, and resolveMerchantId() takes it - changing both signatures is
+ * part of the work.
  */
 function authenticateCaller(req) {
   return true;
@@ -132,6 +136,10 @@ function authenticateCaller(req) {
  * the authenticated caller instead. Deriving it from the caller rather than
  * trusting the request body is what stops one retailer quoting or ordering
  * against another's merchant ID.
+ *
+ * The body fallback below is a demo default so the unconfigured server still
+ * runs. It is not safe on a real platform: any caller can name any merchant.
+ * Replace it before anyone but you can reach this.
  */
 function resolveMerchantId(params) {
   if (MERCHANT_ID) return MERCHANT_ID;

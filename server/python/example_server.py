@@ -1,15 +1,15 @@
 """Example backend for the direct-integration path. Stdlib only.
 
 Routes:
-  POST /api/seel/quote  - browser quote proxy: attaches the server-side API
+  POST /v1/ecommerce/quotes  - browser quote proxy: attaches the server-side API
                           key and forwards to Seel's Quote API (the widget
                           never sees the key)
 
-  POST /api/seel/orders                                     - create order
-  POST /api/seel/orders/{order_id}                          - update order
-  POST /api/seel/orders/{order_id}/cancel                   - cancel order
-  POST /api/seel/orders/{order_id}/fulfillments             - create fulfillment
-  POST /api/seel/orders/{order_id}/fulfillments/{fid}       - update fulfillment
+  POST /v1/ecommerce/orders                                     - create order
+  POST /v1/ecommerce/orders/{order_id}                          - update order
+  POST /v1/ecommerce/orders/{order_id}/cancel                   - cancel order
+  POST /v1/ecommerce/orders/{order_id}/fulfillments             - create fulfillment
+  POST /v1/ecommerce/orders/{order_id}/fulfillments/{fid}       - update fulfillment
 
   POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
                           events: verifies HMAC, ACKs 200 fast, then hands
@@ -29,7 +29,10 @@ Two deployments use these routes differently:
   retailers point at the platform instead of at Seel, and the platform
   resolves which merchant each request belongs to. Retailers hold no Seel
   credentials at all. See authenticate_caller() and resolve_merchant_id()
-  below - those two functions are the whole of what a platform must replace.
+  below, which are where a platform starts. They are not the whole job:
+  order_id comes off the URL and is never checked against the caller, so
+  nothing here stops one retailer touching another's order. That mapping
+  belongs to the platform - see the README.
 
 Run:
   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... python3 example_server.py
@@ -38,7 +41,7 @@ To drive the widget demo against a live sandbox, two steps - this server
 doesn't serve the demo page:
   1. run this server
   2. in widget/demo.html, replace the mock quoteFetcher with
-     configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+     configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 """
 
 import json
@@ -67,7 +70,7 @@ QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
 
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
 
-# Route patterns, mirroring Seel's own paths under an /api/seel prefix.
+# Route patterns, mirroring Seel's real paths, prefix included.
 # Routes mirror Seel's real paths, prefix included, so a caller already
 # written against Seel moves onto a platform by changing the base URL and
 # nothing else. The clients build "<base>/v1/ecommerce/...", so anything
@@ -117,8 +120,9 @@ def authenticate_caller(headers) -> bool:
     A platform MUST replace this. Retailers authenticate to the platform
     with platform credentials - they never receive a Seel API key, because
     one key covers every retailer on the platform and would let any holder
-    act as any other. Return the caller's identity from here and pass it to
-    resolve_merchant_id() so a retailer can only ever touch its own orders.
+    act as any other. A real implementation returns the caller's identity
+    rather than a bool, and resolve_merchant_id() takes it - changing both
+    signatures is part of the work.
     """
     return True
 
@@ -134,6 +138,10 @@ def resolve_merchant_id(params: dict) -> str:
     from the authenticated caller instead. Deriving it from the caller
     rather than trusting the request body is what stops one retailer
     quoting or ordering against another's merchant ID.
+
+    The body fallback below is a demo default so the unconfigured server
+    still runs. It is not safe on a real platform: any caller can name any
+    merchant. Replace it before anyone but you can reach this.
     """
     if MERCHANT_ID:
         return MERCHANT_ID
@@ -149,7 +157,7 @@ def handle_webhook_event(event: dict) -> None:
     to configure it, and tell them which events you want. Do it once per
     environment: a sandbox registration does not carry over to production.
 
- Map merchant_id/order_id to your own retailer code
+    Internal fan-out. Map merchant_id/order_id to your own retailer code
     here and route to your systems. Dedupe on id + type first, since
     delivery is at-least-once. In production, queue this work off the
     request thread instead of processing inline."""

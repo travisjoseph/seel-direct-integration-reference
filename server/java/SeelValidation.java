@@ -4,11 +4,13 @@
  * Required-field sets measured against sandbox on 2026-09-10 by removing one
  * field per request from a known-good payload and recording the response.
  *
- * Requiredness is PER-ACCOUNT. Seel validates a strict default profile and
- * relaxes individual fields for some accounts, so an account may legitimately
- * accept less than this. These sets are the strict profile: sending them is
- * never wrong, but rejecting a payload locally could be. Treat a reported
- * problem as a warning worth checking, not as proof the API would refuse it.
+ * Treat these as a starting point, not a fixed contract. A newly provisioned
+ * account behaves this way; as an integration develops, Seel's implementation
+ * team works out which fields a merchant journey can actually supply and eases
+ * the validation accordingly, so an established account may accept less.
+ * Sending the full set is never wrong, but rejecting a payload locally could
+ * be, so treat a reported problem as a warning worth checking rather than
+ * proof the API would refuse it.
  *
  * Why this is separate from SeelClient, unlike the Python, Node and Rust
  * ports: SeelClient works in raw JSON strings to stay dependency-free, so it

@@ -3,15 +3,15 @@
  * only, no dependencies.
  *
  * Routes:
- *   POST /api/seel/quote  - browser quote proxy: attaches the server-side API
+ *   POST /v1/ecommerce/quotes  - browser quote proxy: attaches the server-side API
  *                           key and forwards to Seel's Quote API (the widget
  *                           never sees the key)
  *
- *   POST /api/seel/orders                                - create order
- *   POST /api/seel/orders/{orderId}                      - update order
- *   POST /api/seel/orders/{orderId}/cancel               - cancel order
- *   POST /api/seel/orders/{orderId}/fulfillments         - create fulfillment
- *   POST /api/seel/orders/{orderId}/fulfillments/{fid}   - update fulfillment
+ *   POST /v1/ecommerce/orders                                - create order
+ *   POST /v1/ecommerce/orders/{orderId}                      - update order
+ *   POST /v1/ecommerce/orders/{orderId}/cancel               - cancel order
+ *   POST /v1/ecommerce/orders/{orderId}/fulfillments         - create fulfillment
+ *   POST /v1/ecommerce/orders/{orderId}/fulfillments/{fid}   - update fulfillment
  *
  *   POST /webhooks/seel   - single webhook endpoint for contract.* and claim.*
  *                           events: verifies HMAC, ACKs 200 fast, then hands
@@ -31,17 +31,20 @@
  *   retailers point at the platform instead of at Seel, and the platform
  *   resolves which merchant each request belongs to. Retailers hold no Seel
  *   credentials at all. See authenticateCaller() and resolveMerchantId()
- *   below - those two methods are the whole of what a platform must replace.
+ *   below, which are where a platform starts. They are not the whole job:
+ *   order_id comes off the URL and is never checked against the caller, so
+ *   nothing here stops one retailer touching another's order. That mapping
+ *   belongs to the platform - see the README.
  *
  * Compile and run:
- *   javac SeelClient.java ExampleServer.java
+ *   javac *.java
  *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... java ExampleServer
  *
  * To drive the widget demo against a live sandbox, two steps - this server
  * doesn't serve the demo page:
  *   1. run this server
  *   2. in widget/demo.html, replace the mock quoteFetcher with
- *      configure({ quoteEndpoint: "http://localhost:8787/api/seel/quote" })
+ *      configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
  *
  * Like SeelClient, this example works in raw JSON strings to stay
  * dependency-free. In a real backend, use your own JSON library (Jackson,
@@ -87,9 +90,9 @@ public class ExampleServer {
      * <p>A platform MUST replace this. Retailers authenticate to the platform
      * with platform credentials - they never receive a Seel API key, because
      * one key covers every retailer on the platform and would let any holder
-     * act as any other. Return the caller's identity from here and pass it to
-     * {@link #resolveMerchantId} so a retailer can only ever touch its own
-     * orders.
+     * act as any other. A real implementation returns the caller's identity
+     * rather than a boolean, and {@link #resolveMerchantId} takes it -
+     * changing both signatures is part of the work.
      */
     static boolean authenticateCaller(HttpExchange exchange) {
         return true;
@@ -340,11 +343,12 @@ public class ExampleServer {
 
     /**
      * Validate a JSON object body and splice extra pairs in after the
-     * opening "{" - a demo-only shortcut for having no JSON library. The
-     * pairs are always inserted, so if the caller also sent those keys the
-     * object gets duplicate keys, and which value Seel uses isn't guaranteed
-     * (parsers differ on duplicate-key precedence). In a real backend, parse
-     * the body and set the fields with your JSON library.
+     * opening "{" - a demo-only shortcut for having no JSON library.
+     * Splicing can only prepend, never overwrite, so a caller who also sent
+     * one of these keys would produce a duplicate and leave the winner to
+     * the upstream parser. Callers are refused rather than allowed to find
+     * that out. In a real backend, parse the body and set the fields with
+     * your JSON library.
      *
      * <p>Answers 400 and returns null when the body isn't a JSON object.
      */
@@ -438,8 +442,9 @@ public class ExampleServer {
             }
             injected.append("\"type\":\"").append(jsonEscape(QUOTE_TYPE)).append("\"");
         }
-        // Storefront code should omit merchant_id and type, as the README
-        // describes - spliceFields always inserts them.
+        // The proxy stamps merchant_id and type, so storefront code should
+        // not send them; spliceFields refuses a body that carries
+        // merchant_id rather than producing a duplicate key.
         String params = spliceFields(exchange, body, injected.toString());
         if (params == null) {
             return;
