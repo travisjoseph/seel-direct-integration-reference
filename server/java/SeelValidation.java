@@ -22,6 +22,8 @@ import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class SeelValidation {
 
@@ -110,6 +112,44 @@ public final class SeelValidation {
                     + " - an object is rejected by the parser with a 500");
         }
         return problems;
+    }
+
+    private static final Pattern SEEL_SERVICES_NULL =
+            Pattern.compile("\"seel_services\"\\s*:\\s*null");
+    private static final Pattern CONTRACT_ID_NULL =
+            Pattern.compile("\"contract_id\"\\s*:\\s*(null|\"\")");
+
+    /**
+     * Return why a Create Order response carries no contract, or null if it
+     * does.
+     *
+     * <p>Seel reports a failed attach as contract_id: null on an otherwise
+     * successful 200 - there is no error status code - so a caller that
+     * trusts the status code believes it has coverage when it has none.
+     *
+     * <p>This scans the raw response text rather than parsing it, because
+     * SeelClient is deliberately dependency-free. That makes it a
+     * best-effort check, not a parser: it will not understand a
+     * contract_id nested somewhere unexpected. Call it only when the
+     * request actually carried a seel_services array. With a JSON library
+     * available, read seel_services[].contract_id directly instead.
+     */
+    public static String contractNotMintedReason(String responseJson) {
+        if (responseJson == null || responseJson.isEmpty()) {
+            return "empty response body";
+        }
+        if (SEEL_SERVICES_NULL.matcher(responseJson).find()) {
+            return "response seel_services is null - check seel_services is an array and "
+                    + "quote_id is inside it, not at the top level";
+        }
+        Matcher m = CONTRACT_ID_NULL.matcher(responseJson);
+        if (m.find()) {
+            return "a seel_services entry returned contract_id " + m.group(1);
+        }
+        if (!responseJson.contains("contract_id")) {
+            return "response carries no contract_id";
+        }
+        return null;
     }
 
     /** Return the problems with a Create Merchant payload. Empty means clean. */

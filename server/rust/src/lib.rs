@@ -26,6 +26,117 @@ use hmac::{Hmac, Mac};
 use serde_json::Value;
 use sha2::Sha256;
 
+/// Percent-encode one path segment.
+///
+/// Ids come from callers and go straight into the upstream URL. Without
+/// this, an id containing `/` (or `%2F`, which decodes to one) reaches a
+/// different endpoint than the method name implies: an `update_order` call
+/// with order id `x/cancel` would cancel instead.
+pub fn path_param(value: &str) -> String {
+    let mut out = String::with_capacity(value.len());
+    for byte in value.as_bytes() {
+        match byte {
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(*byte as char)
+            }
+            other => out.push_str(&format!("%{other:02X}")),
+        }
+    }
+    out
+}
+
+/// Percent-decode one path segment, or return None if it escapes its
+/// segment.
+///
+/// A decoded `/` would reach a different endpoint than the route implies,
+/// and control characters are refused for the same reason. A malformed
+/// escape is rejected rather than silently substituted, so every port
+/// answers the same way. With one API key shared across retailers this is a
+/// privilege boundary, not a cosmetic check.
+pub fn safe_path_param(raw: &str) -> Option<String> {
+    let bytes = raw.as_bytes();
+    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' {
+            let hex = bytes.get(i + 1..i + 3).and_then(|h| std::str::from_utf8(h).ok());
+            let byte = hex.and_then(|h| u8::from_str_radix(h, 16).ok())?;
+            out.push(byte);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    let decoded = String::from_utf8(out).ok()?;
+    if decoded.contains('/') || decoded.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7F) {
+        return None;
+    }
+    Some(decoded)
+}
+
+/// The routes the example server answers.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Route {
+    Quote,
+    Webhook,
+    CreateOrder,
+    UpdateOrder(String),
+    CancelOrder(String),
+    CreateFulfillment(String),
+    UpdateFulfillment(String, String),
+    /// A path that matched a route shape but carried an id that escapes its
+    /// segment.
+    BadPathParam,
+    NotFound,
+}
+
+/// Match a URL onto a route.
+///
+/// The query string is stripped and segments are compared exactly. Empty
+/// segments are NOT collapsed: `/orders//cancel` must not resolve to the
+/// update-order route with an id of `cancel`.
+pub fn parse_route(url: &str) -> Route {
+    let path = url.split('?').next().unwrap_or(url);
+    let segments: Vec<&str> = path.split('/').collect();
+    // A leading '/' always yields an empty first segment.
+    let segments = match segments.split_first() {
+        Some((first, rest)) if first.is_empty() => rest,
+        _ => return Route::NotFound,
+    };
+    // An empty id segment is not a match at all, mirroring the `([^/]+)`
+    // regexes the Python and Node ports use: `/orders//cancel` is a 404,
+    // not a cancel of an order called "".
+    let decode = |raw: &str| if raw.is_empty() { None } else { safe_path_param(raw) };
+    let empty_id = |raw: &str| raw.is_empty();
+    match segments {
+        ["v1", "ecommerce", "quotes"] => Route::Quote,
+        ["webhooks", "seel"] => Route::Webhook,
+        ["v1", "ecommerce", "orders"] => Route::CreateOrder,
+        ["v1", "ecommerce", "orders", id] if !empty_id(id) => match decode(id) {
+            Some(id) => Route::UpdateOrder(id),
+            None => Route::BadPathParam,
+        },
+        ["v1", "ecommerce", "orders", id, "cancel"] if !empty_id(id) => match decode(id) {
+            Some(id) => Route::CancelOrder(id),
+            None => Route::BadPathParam,
+        },
+        ["v1", "ecommerce", "orders", id, "fulfillments"] if !empty_id(id) => match decode(id) {
+            Some(id) => Route::CreateFulfillment(id),
+            None => Route::BadPathParam,
+        },
+        ["v1", "ecommerce", "orders", id, "fulfillments", fid]
+            if !empty_id(id) && !empty_id(fid) =>
+        {
+            match (decode(id), decode(fid)) {
+                (Some(id), Some(fid)) => Route::UpdateFulfillment(id, fid),
+                _ => Route::BadPathParam,
+            }
+        }
+        _ => Route::NotFound,
+    }
+}
+
 pub const SANDBOX_BASE_URL: &str = "https://api-test.seel.com";
 pub const PRODUCTION_BASE_URL: &str = "https://api.seel.com";
 /// The pinned API version; all four language ports match.
@@ -349,9 +460,15 @@ impl SeelClient {
             });
         };
         for entry in services {
-            let minted = entry
-                .get("contract_id")
-                .is_some_and(|c| !c.is_null() && c.as_str() != Some(""));
+            // Falsy means not minted, matching Python and Node: null, "",
+            // 0 and false all mean no contract.
+            let minted = entry.get("contract_id").is_some_and(|c| match c {
+                Value::Null => false,
+                Value::String(s) => !s.is_empty(),
+                Value::Number(n) => n.as_f64() != Some(0.0),
+                Value::Bool(b) => *b,
+                _ => true,
+            });
             if minted {
                 continue;
             }
@@ -410,7 +527,7 @@ impl SeelClient {
     /// Sync changed protection settings, or disable the program for a
     /// retailer - include the reason when disabling.
     pub fn update_merchant(&self, merchant_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/merchants/{merchant_id}"), Some(payload))
+        self.request("POST", &format!("/ecommerce/merchants/{}", path_param(merchant_id)), Some(payload))
     }
 
     // -- Quotes -------------------------------------------------------------
@@ -430,7 +547,7 @@ impl SeelClient {
     }
 
     pub fn get_quote(&self, quote_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/quotes/{quote_id}"), None)
+        self.request("GET", &format!("/ecommerce/quotes/{}", path_param(quote_id)), None)
     }
 
     // -- Orders -------------------------------------------------------------
@@ -467,14 +584,14 @@ impl SeelClient {
 
     /// Sync order changes: line item removed, shipping address updated.
     pub fn update_order(&self, order_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/orders/{order_id}"), Some(payload))
+        self.request("POST", &format!("/ecommerce/orders/{}", path_param(order_id)), Some(payload))
     }
 
     /// Cancel a synced order; its WFP coverage cancels with it.
     /// Refunding the WFP fee and tax to the shopper is the platform's job -
     /// see Cancellation in the README.
     pub fn cancel_order(&self, order_id: &str) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/orders/{order_id}/cancel"), None)
+        self.request("POST", &format!("/ecommerce/orders/{}/cancel", path_param(order_id)), None)
     }
 
     // -- Fulfillments -------------------------------------------------------
@@ -483,7 +600,7 @@ impl SeelClient {
     pub fn create_fulfillment(&self, order_id: &str, payload: &Value) -> Result<Value, SeelError> {
         self.request(
             "POST",
-            &format!("/ecommerce/orders/{order_id}/fulfillments"),
+            &format!("/ecommerce/orders/{}/fulfillments", path_param(order_id)),
             Some(payload),
         )
     }
@@ -497,7 +614,11 @@ impl SeelClient {
     ) -> Result<Value, SeelError> {
         self.request(
             "POST",
-            &format!("/ecommerce/orders/{order_id}/fulfillments/{fulfillment_id}"),
+            &format!(
+                "/ecommerce/orders/{}/fulfillments/{}",
+                path_param(order_id),
+                path_param(fulfillment_id)
+            ),
             Some(payload),
         )
     }
@@ -520,17 +641,17 @@ impl SeelClient {
     /// be changed after creation. Seel records the outcome and fires
     /// claim.accepted or claim.rejected.
     pub fn update_claim(&self, claim_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/claims/{claim_id}"), Some(payload))
+        self.request("POST", &format!("/ecommerce/claims/{}", path_param(claim_id)), Some(payload))
     }
 
     pub fn get_claim(&self, claim_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/claims/{claim_id}"), None)
+        self.request("GET", &format!("/ecommerce/claims/{}", path_param(claim_id)), None)
     }
 
     // -- Lookups (ad hoc; day-to-day state comes via webhooks) ---------------
 
     pub fn get_order(&self, order_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/orders/{order_id}"), None)
+        self.request("GET", &format!("/ecommerce/orders/{}", path_param(order_id)), None)
     }
 
     pub fn list_contracts(&self, query: &str) -> Result<Value, SeelError> {
@@ -631,10 +752,16 @@ mod tests {
         assert!(problems.iter().any(|p| p.contains("must be an array")));
     }
 
-    /// An order with no coverage is a normal sync, not an error.
+    /// An order with no coverage is a normal sync, not an error. The
+    /// absent case and the empty-array case must both pass.
     #[test]
     fn order_without_seel_services_passes() {
-        assert!(validate_order_payload(&order()).is_empty());
+        let mut o = order();
+        assert!(validate_order_payload(&o).is_empty(), "absent");
+        o["seel_services"] = json!([]);
+        assert!(validate_order_payload(&o).is_empty(), "empty array");
+        o["seel_services"] = json!(null);
+        assert!(validate_order_payload(&o).is_empty(), "null");
     }
 
     #[test]
@@ -662,6 +789,59 @@ mod tests {
         let mut with_empty = base.clone();
         with_empty["seel_services"][0]["coverages"] = json!([]);
         assert!(validate_merchant_payload(&with_empty).is_empty());
+    }
+
+    #[test]
+    fn path_param_encodes_separators() {
+        assert_eq!(path_param("ORD1"), "ORD1");
+        assert_eq!(path_param("x/cancel"), "x%2Fcancel");
+        assert_eq!(path_param("a b"), "a%20b");
+    }
+
+    /// An id that escapes its segment must be refused, not folded into the
+    /// upstream path.
+    #[test]
+    fn safe_path_param_refuses_escapes() {
+        assert_eq!(safe_path_param("ORD1").as_deref(), Some("ORD1"));
+        assert_eq!(safe_path_param("ORD1%2Fcancel"), None); // decoded slash
+        assert_eq!(safe_path_param("a%00b"), None); // control character
+        assert_eq!(safe_path_param("%zz"), None); // malformed escape
+    }
+
+    #[test]
+    fn routes_match_seels_real_paths() {
+        assert_eq!(parse_route("/v1/ecommerce/quotes"), Route::Quote);
+        assert_eq!(parse_route("/v1/ecommerce/orders"), Route::CreateOrder);
+        assert_eq!(
+            parse_route("/v1/ecommerce/orders/ORD1"),
+            Route::UpdateOrder("ORD1".to_string())
+        );
+        assert_eq!(
+            parse_route("/v1/ecommerce/orders/ORD1/cancel"),
+            Route::CancelOrder("ORD1".to_string())
+        );
+        assert_eq!(
+            parse_route("/v1/ecommerce/orders/ORD1/fulfillments/F1"),
+            Route::UpdateFulfillment("ORD1".to_string(), "F1".to_string())
+        );
+        assert_eq!(parse_route("/webhooks/seel"), Route::Webhook);
+    }
+
+    /// These are the cases the four ports disagreed on before this change.
+    #[test]
+    fn route_edge_cases() {
+        // A query string must not change routing.
+        assert_eq!(parse_route("/v1/ecommerce/orders?trace=1"), Route::CreateOrder);
+        // A trailing slash is not a create.
+        assert_ne!(parse_route("/v1/ecommerce/orders/"), Route::CreateOrder);
+        // Empty segments are not collapsed: this must not become an update
+        // of an order called "cancel".
+        assert_eq!(parse_route("/v1/ecommerce/orders//cancel"), Route::NotFound);
+        assert_eq!(parse_route("//v1//ecommerce//orders"), Route::NotFound);
+        // An escaping id is refused rather than routed.
+        assert_eq!(parse_route("/v1/ecommerce/orders/ORD1%2Fcancel"), Route::BadPathParam);
+        // The old prefix is gone.
+        assert_eq!(parse_route("/api/seel/orders"), Route::NotFound);
     }
 
     #[test]

@@ -172,7 +172,17 @@ public class ExampleServer {
 
     private static void handle(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod();
-        String path = exchange.getRequestURI().getPath();
+        // getRawPath, not getPath: getPath is already percent-decoded, and
+        // decoding a second time in decode() turns a literal "%" in an id
+        // into a malformed escape and throws out of the handler.
+        String rawPath = exchange.getRequestURI().getRawPath();
+        String path = rawPath == null ? "" : rawPath;
+        // getRawPath already excludes the query string; this keeps the
+        // intent explicit and matches the other ports.
+        int q = path.indexOf('?');
+        if (q >= 0) {
+            path = path.substring(0, q);
+        }
 
         if (method.equalsIgnoreCase("OPTIONS")) { // CORS preflight for the demo page
             // demo only; lock down in prod
@@ -201,14 +211,16 @@ public class ExampleServer {
             return;
         }
 
-        if (path.equals("/api/seel/quote")) {
+        if (path.equals("/v1/ecommerce/quotes")) {
             handleQuote(exchange, body);
             return;
         }
 
-        // Routes mirroring Seel's own paths under /api/seel.
+        // Routes mirror Seel's real paths, prefix included, so a caller
+        // already written against Seel moves onto a platform by changing
+        // the base URL and nothing else.
         String[] seg = segments(path);
-        if (seg.length >= 3 && seg[0].equals("api") && seg[1].equals("seel")
+        if (seg.length >= 3 && seg[0].equals("v1") && seg[1].equals("ecommerce")
                 && seg[2].equals("orders")) {
             // Sync every order, opted in or not. On opt-in the body carries
             // seel_services with the quote_id and price, which mints the
@@ -218,10 +230,19 @@ public class ExampleServer {
                 if (params == null) {
                     return;
                 }
-                forward(exchange, "order", () -> client.createOrder(params));
+                forward(exchange, "order", () -> client.createOrder(params),
+                        params.contains("\"seel_services\""));
+                return;
+            }
+            if (seg[3].isEmpty()) {
+                respond(exchange, 404, "{\"error\": \"not found\"}");
                 return;
             }
             String orderId = decode(seg[3]);
+            if (orderId == null) {
+                respond(exchange, 400, "{\"error\": \"invalid order id in path\"}");
+                return;
+            }
             if (seg.length == 4) {
                 String params = spliceFields(exchange, body, "");
                 if (params == null) {
@@ -244,8 +265,12 @@ public class ExampleServer {
                         () -> client.createFulfillment(orderId, params));
                 return;
             }
-            if (seg.length == 6 && seg[4].equals("fulfillments")) {
+            if (seg.length == 6 && seg[4].equals("fulfillments") && !seg[5].isEmpty()) {
                 String fulfillmentId = decode(seg[5]);
+                if (fulfillmentId == null) {
+                    respond(exchange, 400, "{\"error\": \"invalid id in path\"}");
+                    return;
+                }
                 String params = spliceFields(exchange, body, "");
                 if (params == null) {
                     return;
@@ -259,18 +284,50 @@ public class ExampleServer {
         respond(exchange, 404, "{\"error\": \"not found\"}");
     }
 
-    /** Split a path into its non-empty segments. */
+    /**
+     * Split a path into segments after the leading slash.
+     *
+     * <p>Empty segments are kept, so "/orders//cancel" does not collapse
+     * into a cancel of an order called "cancel". The Python and Node ports
+     * use `([^/]+)` regexes, which reject an empty id, and this has to
+     * match them.
+     */
     private static String[] segments(String path) {
-        return Arrays.stream(path.split("/")).filter(s -> !s.isEmpty()).toArray(String[]::new);
+        String trimmed = path.startsWith("/") ? path.substring(1) : path;
+        return trimmed.split("/", -1);
     }
 
     /**
-     * Percent-decode one path segment. "+" is escaped first because
-     * URLDecoder treats it as a space, which is a query-string rule and
-     * wrong for a path.
+     * Percent-decode one path segment, or return null if it escapes.
+     *
+     * <p>A decoded "/" would reach a different endpoint than the route
+     * implies: "orders/ORD1%2Fcancel" matches the update-order route and
+     * would perform a cancel. Control characters are refused for the same
+     * reason, and a malformed escape is rejected rather than thrown, which
+     * would otherwise escape the handler and close the connection with no
+     * response. With one API key shared across retailers this is a
+     * privilege boundary, not a cosmetic check.
+     *
+     * <p>"+" is escaped first because URLDecoder treats it as a space,
+     * which is a query-string rule and wrong for a path.
      */
     private static String decode(String segment) {
-        return URLDecoder.decode(segment.replace("+", "%2B"), StandardCharsets.UTF_8);
+        String decoded;
+        try {
+            decoded = URLDecoder.decode(segment.replace("+", "%2B"), StandardCharsets.UTF_8);
+        } catch (IllegalArgumentException e) {
+            return null; // malformed percent-escape
+        }
+        if (decoded.indexOf('/') >= 0) {
+            return null;
+        }
+        for (int i = 0; i < decoded.length(); i++) {
+            char c = decoded.charAt(i);
+            if (c < 0x20 || c == 0x7F) {
+                return null;
+            }
+        }
+        return decoded;
     }
 
     /** The merchant_id JSON pair to splice in, or "" when none is set. */
@@ -294,8 +351,20 @@ public class ExampleServer {
     private static String spliceFields(HttpExchange exchange, byte[] body, String injected)
             throws IOException {
         String trimmed = new String(body, StandardCharsets.UTF_8).strip();
-        if (trimmed.isEmpty() || !trimmed.startsWith("{")) {
+        if (trimmed.isEmpty() || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
             respond(exchange, 400, "{\"error\": \"request body must be JSON\"}");
+            return null;
+        }
+        // Splicing cannot overwrite, only prepend, so a caller-supplied
+        // merchant_id would survive as a duplicate key and whichever the
+        // upstream parser prefers would win. On the platform path that
+        // inverts the isolation this proxy is supposed to provide, so
+        // refuse it rather than hope. A backend with a JSON library should
+        // overwrite the field instead.
+        if (!injected.isEmpty() && trimmed.contains("\"merchant_id\"")) {
+            respond(exchange, 400,
+                    "{\"error\": \"do not send merchant_id; the proxy sets it from your "
+                            + "credentials\"}");
             return null;
         }
         if (injected.isEmpty()) {
@@ -306,11 +375,37 @@ public class ExampleServer {
         return rest.equals("}") ? "{" + injected + "}" : "{" + injected + "," + rest;
     }
 
-    /** Call Seel and mirror the result back to the caller. */
+    /**
+     * Call Seel and mirror the result back to the caller.
+     *
+     * <p>Pass checkContract when the request carried a seel_services array,
+     * so a 200 that minted no contract is reported rather than echoed as
+     * success.
+     */
     private static void forward(HttpExchange exchange, String label, SeelCall call)
             throws IOException {
+        forward(exchange, label, call, false);
+    }
+
+    private static void forward(
+            HttpExchange exchange, String label, SeelCall call, boolean checkContract)
+            throws IOException {
         try {
-            respond(exchange, 200, call.call());
+            String body = call.call();
+            if (checkContract) {
+                String reason = SeelValidation.contractNotMintedReason(body);
+                if (reason != null) {
+                    // Seel accepted the order and minted no contract. 502
+                    // would be wrong twice over: the upstream call
+                    // succeeded, and a retry would duplicate the order.
+                    System.out.println("[proxy] " + label + ": " + reason);
+                    respond(exchange, 409,
+                            "{\"error\": \"order created but no contract was minted: "
+                                    + jsonEscape(reason) + "\"}");
+                    return;
+                }
+            }
+            respond(exchange, 200, body);
         } catch (SeelApiException e) {
             // Forward Seel's status and error body - it names the
             // offending field.
@@ -323,9 +418,13 @@ public class ExampleServer {
             }
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
+            System.out.println("[proxy] " + label + " interrupted");
             respond(exchange, 502,
                     "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
         } catch (Exception e) {
+            // Log before answering: a bare 502 leaves the operator unable
+            // to tell a timeout from a bug in this handler.
+            System.out.println("[proxy] " + label + " failed: " + e);
             respond(exchange, 502,
                     "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
         }

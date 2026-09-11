@@ -22,6 +22,18 @@
 
 const crypto = require("node:crypto");
 
+/**
+ * Percent-encode one path segment.
+ *
+ * Ids come from callers and go straight into the upstream URL. Without
+ * this, an id containing "/" (or "%2F", which decodes to one) reaches a
+ * different endpoint than the method name implies - an updateOrder call
+ * with orderId "x/cancel" would cancel instead.
+ */
+function pathParam(value) {
+  return encodeURIComponent(String(value));
+}
+
 const SANDBOX_BASE_URL = "https://api-test.seel.com";
 const PRODUCTION_BASE_URL = "https://api.seel.com";
 const API_VERSION = "2.6.0"; // the pinned API version; all four language ports match
@@ -283,7 +295,7 @@ class SeelClient {
    * retailer - include the reason when disabling.
    */
   updateMerchant(merchantId, payload) {
-    return this._request("POST", `/ecommerce/merchants/${merchantId}`, payload);
+    return this._request("POST", `/ecommerce/merchants/${pathParam(merchantId)}`, payload);
   }
 
   // -- Quotes -------------------------------------------------------------
@@ -305,7 +317,7 @@ class SeelClient {
   }
 
   getQuote(quoteId) {
-    return this._request("GET", `/ecommerce/quotes/${quoteId}`);
+    return this._request("GET", `/ecommerce/quotes/${pathParam(quoteId)}`);
   }
 
   // -- Orders -------------------------------------------------------------
@@ -327,7 +339,7 @@ class SeelClient {
   async createOrder(payload) {
     this._check("createOrder", validateOrderPayload(payload));
     const response = await this._request("POST", "/ecommerce/orders", payload);
-    if (this.checkContract && payload.seel_services) {
+    if (this.checkContract && Array.isArray(payload.seel_services) && payload.seel_services.length) {
       SeelClient._checkContractMinted(payload, response);
     }
     return response;
@@ -340,7 +352,9 @@ class SeelClient {
    */
   static _checkContractMinted(payload, response) {
     const services = response.seel_services;
-    if (!services || !services.length) {
+    // A non-array is a failure, not something to skip: the ports must agree
+    // on this or the check silently does nothing in one of them.
+    if (!Array.isArray(services) || !services.length) {
       const n = payload.seel_services.length;
       throw new SeelContractNotMintedError(
         response,
@@ -350,7 +364,7 @@ class SeelClient {
       );
     }
     for (const entry of services) {
-      if (entry && entry.contract_id) continue;
+      if (entry && typeof entry === "object" && !Array.isArray(entry) && entry.contract_id) continue;
       throw new SeelContractNotMintedError(
         response,
         `service ${JSON.stringify(entry && entry.type)} returned contract_id=null ` +
@@ -371,7 +385,7 @@ class SeelClient {
    * Sync order changes: line item removed, shipping address updated.
    */
   updateOrder(orderId, payload) {
-    return this._request("POST", `/ecommerce/orders/${orderId}`, payload);
+    return this._request("POST", `/ecommerce/orders/${pathParam(orderId)}`, payload);
   }
 
   /**
@@ -380,7 +394,7 @@ class SeelClient {
    * job - see Cancellation in the README.
    */
   cancelOrder(orderId) {
-    return this._request("POST", `/ecommerce/orders/${orderId}/cancel`);
+    return this._request("POST", `/ecommerce/orders/${pathParam(orderId)}/cancel`);
   }
 
   // -- Fulfillments -------------------------------------------------------
@@ -389,7 +403,7 @@ class SeelClient {
    * Send tracking number + carrier when the order ships.
    */
   createFulfillment(orderId, payload) {
-    return this._request("POST", `/ecommerce/orders/${orderId}/fulfillments`, payload);
+    return this._request("POST", `/ecommerce/orders/${pathParam(orderId)}/fulfillments`, payload);
   }
 
   /**
@@ -397,7 +411,7 @@ class SeelClient {
    */
   updateFulfillment(orderId, fulfillmentId, payload) {
     return this._request(
-      "POST", `/ecommerce/orders/${orderId}/fulfillments/${fulfillmentId}`, payload
+      "POST", `/ecommerce/orders/${pathParam(orderId)}/fulfillments/${pathParam(fulfillmentId)}`, payload
     );
   }
 
@@ -423,17 +437,17 @@ class SeelClient {
    * claim.accepted or claim.rejected.
    */
   updateClaim(claimId, payload) {
-    return this._request("POST", `/ecommerce/claims/${claimId}`, payload);
+    return this._request("POST", `/ecommerce/claims/${pathParam(claimId)}`, payload);
   }
 
   getClaim(claimId) {
-    return this._request("GET", `/ecommerce/claims/${claimId}`);
+    return this._request("GET", `/ecommerce/claims/${pathParam(claimId)}`);
   }
 
   // -- Lookups (ad hoc; day-to-day state comes via webhooks) ---------------
 
   getOrder(orderId) {
-    return this._request("GET", `/ecommerce/orders/${orderId}`);
+    return this._request("GET", `/ecommerce/orders/${pathParam(orderId)}`);
   }
 
   listContracts(query = "") {

@@ -47,7 +47,9 @@
 use std::sync::Arc;
 use std::thread;
 
-use seel_direct_integration_reference::{verify_webhook_signature, SeelClient, SeelError, SANDBOX_BASE_URL};
+use seel_direct_integration_reference::{
+    parse_route, verify_webhook_signature, Route, SeelClient, SeelError, SANDBOX_BASE_URL,
+};
 use serde_json::{json, Value};
 use tiny_http::{Header, Method, Request, Response, Server};
 
@@ -120,60 +122,6 @@ fn read_body(request: &mut Request) -> Option<Vec<u8>> {
     }
 }
 
-/// The routes this server answers.
-enum Route {
-    Quote,
-    Webhook,
-    CreateOrder,
-    UpdateOrder(String),
-    CancelOrder(String),
-    CreateFulfillment(String),
-    UpdateFulfillment(String, String),
-    NotFound,
-}
-
-/// Percent-decode a single path segment. Path IDs are usually plain
-/// alphanumerics, but decoding keeps this port's behaviour identical to the
-/// Python and Node ones.
-fn percent_decode(segment: &str) -> String {
-    let bytes = segment.as_bytes();
-    let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
-    let mut i = 0;
-    while i < bytes.len() {
-        if bytes[i] == b'%' && i + 2 < bytes.len() {
-            let hex = std::str::from_utf8(&bytes[i + 1..i + 3]).ok();
-            if let Some(byte) = hex.and_then(|h| u8::from_str_radix(h, 16).ok()) {
-                out.push(byte);
-                i += 3;
-                continue;
-            }
-        }
-        out.push(bytes[i]);
-        i += 1;
-    }
-    String::from_utf8_lossy(&out).into_owned()
-}
-
-/// Match a URL onto a route, mirroring Seel's own paths under /api/seel.
-fn parse_route(url: &str) -> Route {
-    let path = url.split('?').next().unwrap_or(url);
-    let segments: Vec<&str> = path.split('/').filter(|s| !s.is_empty()).collect();
-    match segments.as_slice() {
-        ["api", "seel", "quote"] => Route::Quote,
-        ["webhooks", "seel"] => Route::Webhook,
-        ["api", "seel", "orders"] => Route::CreateOrder,
-        ["api", "seel", "orders", id] => Route::UpdateOrder(percent_decode(id)),
-        ["api", "seel", "orders", id, "cancel"] => Route::CancelOrder(percent_decode(id)),
-        ["api", "seel", "orders", id, "fulfillments"] => {
-            Route::CreateFulfillment(percent_decode(id))
-        }
-        ["api", "seel", "orders", id, "fulfillments", fid] => {
-            Route::UpdateFulfillment(percent_decode(id), percent_decode(fid))
-        }
-        _ => Route::NotFound,
-    }
-}
-
 /// Decide whether the caller may use this proxy.
 ///
 /// This demo accepts everyone, which is only safe because it holds a sandbox
@@ -210,9 +158,40 @@ fn resolve_merchant_id(config: &Config, params: &Value) -> String {
 }
 
 /// Map a Seel result back onto the caller's response.
+/// Map a Seel result back onto the caller's response.
+///
+/// Each failure has to stay distinguishable. Collapsing them into one 502
+/// would report a payload that never left this process as an upstream
+/// outage, and would invite a retry on an order Seel has already accepted.
 fn respond_result(request: Request, label: &str, result: Result<Value, SeelError>) {
     match result {
         Ok(resp) => respond_json(request, 200, &resp),
+        Err(SeelError::Validation { operation, problems }) => {
+            // The request never left this process, so this is the caller's
+            // bug. Hand back every problem at once.
+            respond_json(
+                request,
+                400,
+                &json!({
+                    "error": format!("{operation}: {}", problems.join("; ")),
+                    "problems": problems,
+                }),
+            );
+        }
+        Err(SeelError::ContractNotMinted { detail, response }) => {
+            // Seel accepted the order and minted no contract. 502 would be
+            // wrong twice over: the upstream call succeeded, and a retry
+            // would duplicate the order.
+            println!("[proxy] {label}: {detail}");
+            respond_json(
+                request,
+                409,
+                &json!({
+                    "error": format!("order created but no contract was minted: {detail}"),
+                    "seel_response": *response,
+                }),
+            );
+        }
         Err(SeelError::Api(err)) => {
             // Forward Seel's status and error body - it names the
             // offending field.
@@ -223,18 +202,25 @@ fn respond_result(request: Request, label: &str, result: Result<Value, SeelError
             };
             respond_json(request, err.status, &body);
         }
-        Err(_) => respond_json(
-            request,
-            502,
-            &json!({ "error": format!("upstream {label} request failed") }),
-        ),
+        Err(other) => {
+            // Log before answering: a bare 502 leaves the operator unable
+            // to tell a timeout from a bug in this handler.
+            eprintln!("[proxy] {label} failed: {other}");
+            respond_json(
+                request,
+                502,
+                &json!({ "error": format!("upstream {label} request failed") }),
+            );
+        }
     }
 }
 
 /// Read and parse a JSON object body, or return the error message to send
 /// back with a 400.
 fn read_json_object(request: &mut Request) -> Result<Value, &'static str> {
-    let raw = read_body(request).ok_or("request body must be JSON")?;
+    // A body that never fully arrived is not the same as a malformed one,
+    // and saying so would send the caller looking at the wrong thing.
+    let raw = read_body(request).ok_or("could not read request body")?;
     let parsed: Value =
         serde_json::from_slice(&raw).map_err(|_| "request body must be JSON")?;
     if parsed.is_object() {
@@ -350,7 +336,11 @@ fn handle_webhook(mut request: Request, config: &Config) {
         .find(|h| h.field.equiv("X-Seel-Hmac-SHA256"))
         .map(|h| h.value.as_str().to_string())
         .unwrap_or_default();
-    if !verify_webhook_signature(&raw, &signature, &config.webhook_secret) {
+    // An empty secret is a valid HMAC key, so without this check an
+    // unconfigured server authenticates anyone who signs with "".
+    if config.webhook_secret.is_empty()
+        || !verify_webhook_signature(&raw, &signature, &config.webhook_secret)
+    {
         respond_json(request, 401, &json!({"error": "invalid signature"}));
         return;
     }
@@ -395,6 +385,9 @@ fn handle_request(request: Request, config: &Config) {
         Route::CreateFulfillment(id) => handle_create_fulfillment(request, config, &id),
         Route::UpdateFulfillment(id, fid) => {
             handle_update_fulfillment(request, config, &id, &fid)
+        }
+        Route::BadPathParam => {
+            respond_json(request, 400, &json!({"error": "invalid id in path"}))
         }
         Route::NotFound => respond_json(request, 404, &json!({"error": "not found"})),
     }

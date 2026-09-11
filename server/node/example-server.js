@@ -50,6 +50,8 @@ const {
   SANDBOX_BASE_URL,
   SeelAPIError,
   SeelClient,
+  SeelContractNotMintedError,
+  SeelValidationError,
   verifyWebhookSignature,
 } = require("./seel-client");
 
@@ -65,13 +67,43 @@ const QUOTE_TYPE = process.env.SEEL_QUOTE_TYPE || "";
 const client = new SeelClient(API_KEY, BASE_URL);
 
 // Route patterns, mirroring Seel's own paths under an /api/seel prefix.
-const QUOTE_PATH = "/api/seel/quote";
+// Routes mirror Seel's real paths, prefix included, so a caller already
+// written against Seel moves onto a platform by changing the base URL and
+// nothing else. The clients build "<base>/v1/ecommerce/...", so anything
+// shorter would 404 every call.
+const QUOTE_PATH = "/v1/ecommerce/quotes";
 const WEBHOOK_PATH = "/webhooks/seel";
-const ORDERS_PATH = /^\/api\/seel\/orders$/;
-const ORDER_PATH = /^\/api\/seel\/orders\/([^/]+)$/;
-const ORDER_CANCEL_PATH = /^\/api\/seel\/orders\/([^/]+)\/cancel$/;
-const FULFILLMENTS_PATH = /^\/api\/seel\/orders\/([^/]+)\/fulfillments$/;
-const FULFILLMENT_PATH = /^\/api\/seel\/orders\/([^/]+)\/fulfillments\/([^/]+)$/;
+const ORDERS_PATH = /^\/v1\/ecommerce\/orders$/;
+const ORDER_PATH = /^\/v1\/ecommerce\/orders\/([^/]+)$/;
+const ORDER_CANCEL_PATH = /^\/v1\/ecommerce\/orders\/([^/]+)\/cancel$/;
+const FULFILLMENTS_PATH = /^\/v1\/ecommerce\/orders\/([^/]+)\/fulfillments$/;
+const FULFILLMENT_PATH = /^\/v1\/ecommerce\/orders\/([^/]+)\/fulfillments\/([^/]+)$/;
+
+/**
+ * Percent-decode one path segment, or return null if it escapes.
+ *
+ * A segment arrives encoded and is interpolated into the upstream URL, so a
+ * decoded "/" would reach a different endpoint than the route implies:
+ * "orders/ORD1%2Fcancel" matches the update-order route and would perform a
+ * cancel. Control characters are refused for the same reason. A malformed
+ * escape is rejected rather than thrown, which would otherwise surface as a
+ * 500. With one API key shared across retailers this is a privilege
+ * boundary, not a cosmetic check.
+ */
+function safePathParam(raw) {
+  let decoded;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return null; // malformed percent-escape
+  }
+  if (decoded.includes("/")) return null;
+  for (const ch of decoded) {
+    const code = ch.codePointAt(0);
+    if (code < 0x20 || code === 0x7f) return null;
+  }
+  return decoded;
+}
 
 /**
  * Decide whether the caller may use this proxy.
@@ -113,13 +145,26 @@ async function forward(res, label, call) {
   try {
     respond(res, 200, await call());
   } catch (exc) {
-    if (exc instanceof SeelAPIError) {
+    if (exc instanceof SeelValidationError) {
+      // The request never left this process, so this is the caller's bug.
+      // Hand back every problem at once.
+      respond(res, 400, { error: exc.message, problems: exc.problems });
+    } else if (exc instanceof SeelContractNotMintedError) {
+      // Seel accepted the order and minted no contract. 502 would be wrong
+      // twice over: the upstream call succeeded, and a retry would
+      // duplicate the order.
+      console.log(`[proxy] ${label}: ${exc.message}`);
+      respond(res, 409, { error: exc.message, seel_response: exc.response });
+    } else if (exc instanceof SeelAPIError) {
       // Forward Seel's status and error body - it names the offending
       // field.
       const errBody =
         exc.body !== null && typeof exc.body === "object" ? exc.body : { error: exc.message };
       respond(res, exc.status, errBody);
     } else {
+      // Log before answering: a bare 502 leaves the operator unable to tell
+      // a timeout from a bug in this handler.
+      console.log(`[proxy] ${label} failed: ${exc}`);
       respond(res, 502, { error: `upstream ${label} request failed` });
     }
   }
@@ -191,18 +236,21 @@ async function handleRequest(req, res) {
   }
 
   const body = await readBody(req);
+  // Match on the path only. Ports that keep the query string here would 404
+  // a request the others route.
+  const path = req.url.split("?")[0];
 
   if (req.method !== "POST") {
     respond(res, 404, { error: "not found" });
     return;
   }
 
-  if (req.url !== WEBHOOK_PATH && !authenticateCaller(req)) {
+  if (path !== WEBHOOK_PATH && !authenticateCaller(req)) {
     respond(res, 401, { error: "unauthorized" });
     return;
   }
 
-  if (req.url === QUOTE_PATH) {
+  if (path === QUOTE_PATH) {
     const params = jsonBody(res, body);
     if (params === null) return;
     const merchantId = resolveMerchantId(params);
@@ -215,7 +263,7 @@ async function handleRequest(req, res) {
   // Sync every order, opted in or not. On opt-in the body carries
   // seel_services with the quote_id and price, which mints the contract
   // and fires contract.created.
-  if (ORDERS_PATH.test(req.url)) {
+  if (ORDERS_PATH.test(path)) {
     const params = jsonBody(res, body);
     if (params === null) return;
     const merchantId = resolveMerchantId(params);
@@ -225,17 +273,25 @@ async function handleRequest(req, res) {
   }
 
   // Cancel carries no body.
-  let match = ORDER_CANCEL_PATH.exec(req.url);
+  let match = ORDER_CANCEL_PATH.exec(path);
   if (match) {
-    const orderId = decodeURIComponent(match[1]);
+    const orderId = safePathParam(match[1]);
+    if (orderId === null) {
+      respond(res, 400, { error: "invalid order id in path" });
+      return;
+    }
     await forward(res, "order cancel", () => client.cancelOrder(orderId));
     return;
   }
 
-  match = FULFILLMENT_PATH.exec(req.url);
+  match = FULFILLMENT_PATH.exec(path);
   if (match) {
-    const orderId = decodeURIComponent(match[1]);
-    const fulfillmentId = decodeURIComponent(match[2]);
+    const orderId = safePathParam(match[1]);
+    const fulfillmentId = safePathParam(match[2]);
+    if (orderId === null || fulfillmentId === null) {
+      respond(res, 400, { error: "invalid id in path" });
+      return;
+    }
     const params = jsonBody(res, body);
     if (params === null) return;
     await forward(res, "fulfillment update", () =>
@@ -244,27 +300,37 @@ async function handleRequest(req, res) {
     return;
   }
 
-  match = FULFILLMENTS_PATH.exec(req.url);
+  match = FULFILLMENTS_PATH.exec(path);
   if (match) {
-    const orderId = decodeURIComponent(match[1]);
+    const orderId = safePathParam(match[1]);
+    if (orderId === null) {
+      respond(res, 400, { error: "invalid order id in path" });
+      return;
+    }
     const params = jsonBody(res, body);
     if (params === null) return;
     await forward(res, "fulfillment", () => client.createFulfillment(orderId, params));
     return;
   }
 
-  match = ORDER_PATH.exec(req.url);
+  match = ORDER_PATH.exec(path);
   if (match) {
-    const orderId = decodeURIComponent(match[1]);
+    const orderId = safePathParam(match[1]);
+    if (orderId === null) {
+      respond(res, 400, { error: "invalid order id in path" });
+      return;
+    }
     const params = jsonBody(res, body);
     if (params === null) return;
     await forward(res, "order update", () => client.updateOrder(orderId, params));
     return;
   }
 
-  if (req.url === WEBHOOK_PATH) {
+  if (path === WEBHOOK_PATH) {
     const signature = req.headers["x-seel-hmac-sha256"] || "";
-    if (!verifyWebhookSignature(body, signature, WEBHOOK_SECRET)) {
+    // An empty secret is a valid HMAC key, so without this check an
+    // unconfigured server authenticates anyone who signs with "".
+    if (!WEBHOOK_SECRET || !verifyWebhookSignature(body, signature, WEBHOOK_SECRET)) {
       respond(res, 401, { error: "invalid signature" });
       return;
     }

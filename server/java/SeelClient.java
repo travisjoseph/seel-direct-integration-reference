@@ -25,6 +25,7 @@
 
 import java.io.IOException;
 import java.net.URI;
+import java.net.URLEncoder;
 import java.net.http.HttpClient;
 import java.net.http.HttpRequest;
 import java.net.http.HttpResponse;
@@ -37,6 +38,24 @@ import javax.crypto.Mac;
 import javax.crypto.spec.SecretKeySpec;
 
 public class SeelClient {
+
+    /**
+     * Percent-encode one path segment.
+     *
+     * <p>Ids come from callers and go straight into the upstream URL.
+     * Without this, an id containing "/" (or "%2F", which decodes to one)
+     * reaches a different endpoint than the method name implies: an
+     * updateOrder call with order id "x/cancel" would cancel instead.
+     *
+     * <p>URLEncoder is form-encoding, so "+" and the characters it leaves
+     * alone are corrected afterwards to give true path-segment encoding.
+     */
+    static String pathParam(String value) {
+        return URLEncoder.encode(value, StandardCharsets.UTF_8)
+                .replace("+", "%20")
+                .replace("*", "%2A")
+                .replace("%7E", "~");
+    }
 
     public static final String SANDBOX_BASE_URL = "https://api-test.seel.com";
     public static final String PRODUCTION_BASE_URL = "https://api.seel.com";
@@ -116,7 +135,7 @@ public class SeelClient {
      */
     public String updateMerchant(String merchantId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
-        return request("POST", "/ecommerce/merchants/" + merchantId, payloadJson);
+        return request("POST", "/ecommerce/merchants/" + pathParam(merchantId), payloadJson);
     }
 
     // -- Quotes --------------------------------------------------------------
@@ -139,7 +158,7 @@ public class SeelClient {
 
     public String getQuote(String quoteId)
             throws SeelApiException, IOException, InterruptedException {
-        return request("GET", "/ecommerce/quotes/" + quoteId, null);
+        return request("GET", "/ecommerce/quotes/" + pathParam(quoteId), null);
     }
 
     // -- Orders --------------------------------------------------------------
@@ -180,7 +199,7 @@ public class SeelClient {
      */
     public String updateOrder(String orderId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
-        return request("POST", "/ecommerce/orders/" + orderId, payloadJson);
+        return request("POST", "/ecommerce/orders/" + pathParam(orderId), payloadJson);
     }
 
     /**
@@ -190,7 +209,7 @@ public class SeelClient {
      */
     public String cancelOrder(String orderId)
             throws SeelApiException, IOException, InterruptedException {
-        return request("POST", "/ecommerce/orders/" + orderId + "/cancel", null);
+        return request("POST", "/ecommerce/orders/" + pathParam(orderId) + "/cancel", null);
     }
 
     // -- Fulfillments ----------------------------------------------------------
@@ -200,7 +219,7 @@ public class SeelClient {
      */
     public String createFulfillment(String orderId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
-        return request("POST", "/ecommerce/orders/" + orderId + "/fulfillments", payloadJson);
+        return request("POST", "/ecommerce/orders/" + pathParam(orderId) + "/fulfillments", payloadJson);
     }
 
     /**
@@ -209,7 +228,7 @@ public class SeelClient {
     public String updateFulfillment(String orderId, String fulfillmentId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
         return request("POST",
-                "/ecommerce/orders/" + orderId + "/fulfillments/" + fulfillmentId, payloadJson);
+                "/ecommerce/orders/" + pathParam(orderId) + "/fulfillments/" + pathParam(fulfillmentId), payloadJson);
     }
 
     // -- Claims ----------------------------------------------------------------
@@ -236,19 +255,19 @@ public class SeelClient {
      */
     public String updateClaim(String claimId, String payloadJson)
             throws SeelApiException, IOException, InterruptedException {
-        return request("POST", "/ecommerce/claims/" + claimId, payloadJson);
+        return request("POST", "/ecommerce/claims/" + pathParam(claimId), payloadJson);
     }
 
     public String getClaim(String claimId)
             throws SeelApiException, IOException, InterruptedException {
-        return request("GET", "/ecommerce/claims/" + claimId, null);
+        return request("GET", "/ecommerce/claims/" + pathParam(claimId), null);
     }
 
     // -- Lookups (ad hoc; day-to-day state comes via webhooks) -----------------
 
     public String getOrder(String orderId)
             throws SeelApiException, IOException, InterruptedException {
-        return request("GET", "/ecommerce/orders/" + orderId, null);
+        return request("GET", "/ecommerce/orders/" + pathParam(orderId), null);
     }
 
     public String listContracts()

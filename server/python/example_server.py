@@ -91,6 +91,17 @@ def safe_path_param(raw: str):
     API key shared across retailers this is a privilege boundary, not a
     cosmetic check.
     """
+    # unquote leaves a malformed escape as literal text rather than
+    # raising, so check the escapes explicitly. Without this the segment is
+    # forwarded upstream re-encoded, where Node and Java reject it.
+    i = 0
+    while i < len(raw):
+        if raw[i] == "%":
+            if len(raw) < i + 3 or any(c not in "0123456789abcdefABCDEF" for c in raw[i + 1 : i + 3]):
+                return None
+            i += 3
+        else:
+            i += 1
     decoded = unquote(raw)
     if "/" in decoded or any(ord(c) < 0x20 or ord(c) == 0x7F for c in decoded):
         return None
