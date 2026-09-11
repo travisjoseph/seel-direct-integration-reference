@@ -395,7 +395,7 @@ fn handle_request(request: Request, config: &Config) {
             handle_update_fulfillment(request, config, &id, &fid)
         }
         Route::BadPathParam => {
-            respond_json(request, 400, &json!({"error": "invalid id in path"}))
+            respond_json(request, 400, &json!({"error": "invalid order id in path"}))
         }
         Route::NotFound => respond_json(request, 404, &json!({"error": "not found"})),
     }

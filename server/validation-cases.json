@@ -1,5 +1,5 @@
 {
-  "_comment": "Shared validation cases, read by the test suite in every language port. The ports must agree: same accept/reject decision, same field paths. expect_contains matches substrings against the joined problem list.",
+  "_comment": "Shared cases, read by the test suite in every language port. The ports must agree. 'cases' exercise payload validation and match expect_contains as substrings of the joined problem list. 'contract_cases' exercise the post-condition check on Create Order: expect_minted false means the port must report a failed attach. 'uncovered_requests' fix when that check runs at all. response_json/request_json are the same value pre-serialized, for the Java port, which has no parser and works in raw JSON strings.",
   "cases": [
     {
       "name": "quote: complete payload",
@@ -711,6 +711,228 @@
         "shipping_address",
         "line_items"
       ]
+    }
+  ],
+  "contract_cases": [
+    {
+      "name": "attach minted",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": "ct_1"
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": \"ct_1\"}]}",
+      "expect_minted": true
+    },
+    {
+      "name": "contract_id null",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": null
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": null}]}",
+      "expect_minted": false,
+      "note": "the common silent failure: HTTP 200 with no coverage"
+    },
+    {
+      "name": "contract_id empty string",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": ""
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": \"\"}]}",
+      "expect_minted": false
+    },
+    {
+      "name": "contract_id zero",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": 0
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": 0}]}",
+      "expect_minted": false,
+      "note": "falsy means not minted; the ports disagreed on this one"
+    },
+    {
+      "name": "contract_id false",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": false
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": false}]}",
+      "expect_minted": false
+    },
+    {
+      "name": "seel_services null",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": null
+      },
+      "response_json": "{\"seel_services\": null}",
+      "expect_minted": false,
+      "note": "what a top-level quote_id produces"
+    },
+    {
+      "name": "seel_services absent",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "order_id": "o-1"
+      },
+      "response_json": "{\"order_id\": \"o-1\"}",
+      "expect_minted": false
+    },
+    {
+      "name": "seel_services empty array",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": []
+      },
+      "response_json": "{\"seel_services\": []}",
+      "expect_minted": false
+    },
+    {
+      "name": "contract_id is a string starting with zero",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": "012"
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": \"012\"}]}",
+      "expect_minted": true,
+      "note": "a real id, not a falsy zero"
+    }
+  ],
+  "uncovered_requests": [
+    {
+      "name": "no seel_services is a normal sync",
+      "request": {
+        "order_id": "o-1"
+      },
+      "request_json": "{\"order_id\": \"o-1\"}",
+      "expect_checked": false
+    },
+    {
+      "name": "empty seel_services is a normal sync",
+      "request": {
+        "order_id": "o-1",
+        "seel_services": []
+      },
+      "request_json": "{\"order_id\": \"o-1\", \"seel_services\": []}",
+      "expect_checked": false
+    },
+    {
+      "name": "a populated seel_services array is checked",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "request_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"quote_id\": \"q-1\", \"price\": 0.98}]}",
+      "expect_checked": true
     }
   ]
 }

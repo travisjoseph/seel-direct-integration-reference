@@ -17,12 +17,14 @@ const path = require("node:path");
 const { test } = require("node:test");
 
 const {
+  SeelClient,
+  SeelContractNotMintedError,
   validateMerchantPayload,
   validateOrderPayload,
   validateQuotePayload,
 } = require("./seel-client");
 
-const { cases } = JSON.parse(
+const { cases, contract_cases: contractCases, uncovered_requests: uncovered } = JSON.parse(
   fs.readFileSync(path.join(__dirname, "..", "validation-cases.json"), "utf8")
 );
 
@@ -39,9 +41,32 @@ for (const testCase of cases) {
     if (testCase.expect_clean) {
       assert.deepStrictEqual(problems, [], `expected no problems, got ${joined}`);
     } else {
+      assert.ok(problems.length > 0, "expected problems, got none");
       for (const fragment of testCase.expect_contains) {
         assert.ok(joined.includes(fragment), `expected "${fragment}" in: ${joined}`);
       }
     }
+  });
+}
+
+// The post-condition check on Create Order must agree across ports.
+for (const testCase of contractCases) {
+  test(`contract: ${testCase.name}`, () => {
+    let minted = true;
+    try {
+      SeelClient._checkContractMinted(testCase.request, testCase.response);
+    } catch (exc) {
+      assert.ok(exc instanceof SeelContractNotMintedError, `unexpected ${exc}`);
+      minted = false;
+    }
+    assert.strictEqual(minted, testCase.expect_minted);
+  });
+}
+
+for (const testCase of uncovered) {
+  test(`gating: ${testCase.name}`, () => {
+    const services = testCase.request.seel_services;
+    const checked = Array.isArray(services) && services.length > 0;
+    assert.strictEqual(checked, testCase.expect_checked);
   });
 }

@@ -129,7 +129,7 @@ the difference between your bug, Seel's answer, and a network problem:
 | Status | Means |
 |---|---|
 | Seel's own status | Seel rejected it. Its error body is passed straight through, so you see the field it objected to |
-| `400` | This proxy rejected it before sending. The body carries a `problems` array listing every fault at once |
+| `400` | This proxy rejected it before sending. On Python, Node and Rust the body carries a `problems` array listing every fault at once; the Java port does not validate, so its 400s carry a plain `error` |
 | `409` | Seel accepted the order and minted no contract. The order exists upstream, so do not retry it |
 | `502` | Seel could not be reached |
 
@@ -137,8 +137,12 @@ An id that would escape its path segment is refused with a `400` rather
 than forwarded: a decoded `/` would reach a different endpoint than the
 route names.
 
-Merchant onboarding (`create_merchant`, `create_orders_batch`) has no
-route: it runs from your onboarding flow, not from a retailer request.
+The proxy forwards the write path only. Merchant onboarding
+(`create_merchant`, `create_orders_batch`) has no route, because it runs
+from your onboarding flow rather than a retailer request; neither do claims
+or any of the `GET` lookups, which the clients still expose for you to call
+directly. `batch` is rejected as an order id so it cannot be reached
+through the update-order route.
 
 ## Integration flow
 
@@ -204,8 +208,9 @@ Credentials live in environment variables. Never commit them.
 Moving between environments is a config change, never a code change: the
 base URL comes from `SEEL_BASE_URL`, or from the constructor if you pass
 one. The two hosts appear in each client as the `SANDBOX_BASE_URL` and
-`PRODUCTION_BASE_URL` constants. Sandbox is the constructor default, so a
-client built without a base URL talks to sandbox rather than failing.
+`PRODUCTION_BASE_URL` constants. In Python, Node and Java sandbox is the
+constructor default, so a client built without a base URL talks to sandbox
+rather than failing; Rust takes the base URL as a required argument.
 
 **Four values are environment-scoped, not one.** Swapping only the URL will
 fail on the first call:
@@ -232,9 +237,10 @@ configured by Seel rather than by you:
   which is easy to mistake for a working integration. Check
   `coverages[]` is non-empty before treating a quote as an offer.
 
-So the intended flow is: keep one `.env` per environment, switch which one
-is loaded, and confirm with Seel that webhooks and rates are configured on
-the target environment before the first real order.
+Nothing here reads a `.env` file: each port reads the process environment
+directly, and `.env.example` is a checklist of the variables to set. Keep
+one set per environment, and confirm with Seel that webhooks and rates are
+configured on the target environment before the first real order.
 
 Every request carries `X-Seel-Api-Key` and `X-Seel-Api-Version`. The pinned
 version is the `API_VERSION` constant in each client and is the same in both
@@ -247,21 +253,30 @@ proxy, never straight to Seel.
 
 Every port runs the same cases, from `server/validation-cases.json`. They
 exist to catch drift between the ports rather than to prove any one of them
-correct: the four must make the same accept/reject decision and report the
-same field paths. Each uses what its runtime already ships, so there is
-nothing to install.
+correct: the four must make the same accept/reject decision, and every
+expected field path must appear in each port's output. Each uses what its
+runtime already ships, so there is nothing to install.
+
+The fixture covers payload validation, the contract-minted check, and when
+that check runs at all. It does not cover routing, path-parameter decoding
+or the proxy's error mapping, which are per-port code - Rust carries local
+tests for those.
 
 ```bash
 python3 -m unittest discover server/python
-node --test server/node
-cd server/rust && cargo test
-cd server/java && javac *.java && java SeelValidationTest
+node --test server/node/test-validation.js
+(cd server/rust && cargo test)
+(cd server/java && javac *.java && java SeelValidationTest)
 ```
 
-Rust additionally covers route matching and path-parameter decoding, which
-are per-port code rather than shared behaviour. If you change a required
-field, change it in `validation-cases.json` too, or three ports will
-disagree with the fourth in silence.
+The Java suite reads the fixture relative to its own directory, hence the
+subshell. `node --test server/node` (the directory form) fails on Node 24,
+which treats the argument as a module rather than a glob.
+
+If you change a required field, change it in `validation-cases.json` too.
+Change one port and the fixture fails loudly, which is the point; change
+all four and forget the fixture, and it keeps passing on a rule none of
+them still applies.
 
 ## Validation rules
 
@@ -332,10 +347,12 @@ a 500.
 
 ### Three ways an attach fails, two of them silently
 
-A failed attach is reported as `contract_id: null` on an otherwise
-successful response. There is no error status code, so an integration can
-look healthy while covering nothing. The clients check the response for a
-real `contract_id` for exactly this reason.
+Two of the three return HTTP 200 while attaching nothing, so an
+integration can look healthy while covering nothing. The Python, Node and
+Rust clients check the response for a real `contract_id` for exactly this
+reason; in Java the helper exists as
+`SeelValidation.contractNotMintedReason` and the example server calls it,
+but `SeelClient` does not.
 
 | Mistake | What you get back |
 |---|---|

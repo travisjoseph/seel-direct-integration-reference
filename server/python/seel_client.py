@@ -370,7 +370,7 @@ class SeelClient:
         rather than a status code, so nothing else in the stack notices.
         """
         services = response.get("seel_services")
-        if not services:
+        if not isinstance(services, list) or not services:
             raise SeelContractNotMintedError(
                 response,
                 f"sent {len(payload['seel_services'])} seel_services entr"
@@ -379,7 +379,14 @@ class SeelClient:
                 "list and quote_id is inside it, not at the top level.",
             )
         for entry in services:
-            if not isinstance(entry, dict) or entry.get("contract_id"):
+            if not isinstance(entry, dict):
+                # A non-object entry is a failure, not something to skip.
+                # The ports have to agree here or the check silently does
+                # nothing in one of them.
+                raise SeelContractNotMintedError(
+                    response, f"seel_services contains a non-object entry: {entry!r}"
+                )
+            if entry.get("contract_id"):
                 continue
             raise SeelContractNotMintedError(
                 response,

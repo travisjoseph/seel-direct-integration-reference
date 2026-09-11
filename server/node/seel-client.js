@@ -77,9 +77,9 @@ class SeelValidationError extends Error {
 /**
  * Raised when createOrder returns 200 but no contract was created.
  *
- * Seel reports a failed attach as contract_id: null on an otherwise
- * successful response - there is no error status code. Without this check
- * an integration looks healthy while covering nothing.
+ * Every failed attach observed so far is contract_id: null on an otherwise
+ * successful response rather than a status code. Without this check an
+ * integration looks healthy while covering nothing.
  */
 class SeelContractNotMintedError extends Error {
   constructor(response, detail) {
@@ -139,12 +139,6 @@ const MERCHANT_REQUIRED = {
   "seel_services[]": ["type", "coverages"],
 };
 
-/**
- * Missing means the key is absent, null/undefined, or an empty string.
- * false and 0 are real values - is_default_on, requires_shipping and
- * allocated_discounts all legitimately take them. An empty array is a real
- * value too: merchant coverages: [] is accepted.
- */
 // Shape expectations, checked alongside presence. A scalar where an object
 // belongs is the archetypal payload mistake, and without this the nested
 // rules silently skip it: resolveScope only descends into objects, so
@@ -186,6 +180,12 @@ function checkShapes(payload, specs) {
   return problems;
 }
 
+/**
+ * Missing means the key is absent, null/undefined, or an empty string.
+ * false and 0 are real values - is_default_on, requires_shipping and
+ * allocated_discounts all legitimately take them. An empty array is a real
+ * value too: merchant coverages: [] is accepted.
+ */
 function isAbsent(value) {
   return value === undefined || value === null || value === "";
 }

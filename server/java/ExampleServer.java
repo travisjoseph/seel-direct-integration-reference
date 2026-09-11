@@ -56,7 +56,6 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
-import java.net.URLDecoder;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.concurrent.Executors;
@@ -111,6 +110,13 @@ public class ExampleServer {
      * quoting or ordering against another's merchant ID.
      */
     static String resolveMerchantId(HttpExchange exchange) {
+        // Unlike the other ports there is no request-body fallback here,
+        // because this port has no parser to read one with. When
+        // SEEL_MERCHANT_ID is unset nothing is stamped and the caller's own
+        // merchant_id passes through untouched, which is the same
+        // end result and carries the same warning: on a real platform,
+        // derive the merchant from the authenticated caller instead of
+        // trusting whatever the body says.
         return MERCHANT_ID;
     }
 
@@ -234,7 +240,7 @@ public class ExampleServer {
                     return;
                 }
                 forward(exchange, "order", () -> client.createOrder(params),
-                        params.contains("\"seel_services\""));
+                        SeelValidation.carriesCoverage(params));
                 return;
             }
             if (seg[3].isEmpty()) {
@@ -301,6 +307,16 @@ public class ExampleServer {
     }
 
     /**
+     * Segments that are Seel endpoints in their own right and so can never
+     * be an order id. Seel's own collection endpoints live alongside order
+     * ids, so an id that equals one of them would reach the collection
+     * instead. "batch" is POST /v1/ecommerce/orders/batch, the
+     * order-history backfill: routed as an order id it would proxy an
+     * unstamped, unvalidated batch write.
+     */
+    private static final java.util.Set<String> RESERVED_PATH_SEGMENTS = java.util.Set.of("batch");
+
+    /**
      * Percent-decode one path segment, or return null if it escapes.
      *
      * <p>A decoded "/" would reach a different endpoint than the route
@@ -311,17 +327,62 @@ public class ExampleServer {
      * response. With one API key shared across retailers this is a
      * privilege boundary, not a cosmetic check.
      *
-     * <p>"+" is escaped first because URLDecoder treats it as a space,
-     * which is a query-string rule and wrong for a path.
+     * <p>"+" is left alone: treating it as a space is a query-string rule
+     * and wrong for a path.
+     *
+     * <p>One case never reaches here: com.sun.net.httpserver rejects a
+     * malformed escape such as "%zz" while parsing the request URI and
+     * answers its own HTML 400. Same status as the other ports, different
+     * body, and not something this handler can intercept.
      */
+
     private static String decode(String segment) {
+        // Decode the escapes to bytes by hand, then insist the result is
+        // valid UTF-8. URLDecoder substitutes U+FFFD for invalid sequences
+        // rather than failing, which would forward a mangled id upstream
+        // where the other ports return a 400.
+        byte[] raw = new byte[segment.length()];
+        int len = 0;
+        for (int i = 0; i < segment.length(); ) {
+            char c = segment.charAt(i);
+            if (c == '%') {
+                if (i + 2 >= segment.length()) {
+                    return null; // truncated escape
+                }
+                int hi = Character.digit(segment.charAt(i + 1), 16);
+                int lo = Character.digit(segment.charAt(i + 2), 16);
+                if (hi < 0 || lo < 0) {
+                    return null; // malformed escape
+                }
+                raw[len++] = (byte) ((hi << 4) + lo);
+                i += 3;
+            } else if (c < 0x80) {
+                raw[len++] = (byte) c;
+                i++;
+            } else {
+                // Already-decoded non-ASCII: re-encode so the UTF-8 check
+                // below sees the same bytes either way.
+                byte[] utf8 = String.valueOf(c).getBytes(StandardCharsets.UTF_8);
+                if (len + utf8.length > raw.length) {
+                    return null;
+                }
+                System.arraycopy(utf8, 0, raw, len, utf8.length);
+                len += utf8.length;
+                i++;
+            }
+        }
         String decoded;
         try {
-            decoded = URLDecoder.decode(segment.replace("+", "%2B"), StandardCharsets.UTF_8);
-        } catch (IllegalArgumentException e) {
-            return null; // malformed percent-escape
+            decoded = StandardCharsets.UTF_8
+                    .newDecoder()
+                    .onMalformedInput(java.nio.charset.CodingErrorAction.REPORT)
+                    .onUnmappableCharacter(java.nio.charset.CodingErrorAction.REPORT)
+                    .decode(java.nio.ByteBuffer.wrap(raw, 0, len))
+                    .toString();
+        } catch (java.nio.charset.CharacterCodingException e) {
+            return null; // not valid UTF-8
         }
-        if (decoded.indexOf('/') >= 0) {
+        if (decoded.indexOf('/') >= 0 || RESERVED_PATH_SEGMENTS.contains(decoded)) {
             return null;
         }
         for (int i = 0; i < decoded.length(); i++) {
@@ -360,16 +421,20 @@ public class ExampleServer {
             return null;
         }
         // Splicing cannot overwrite, only prepend, so a caller-supplied
-        // merchant_id would survive as a duplicate key and whichever the
-        // upstream parser prefers would win. On the platform path that
-        // inverts the isolation this proxy is supposed to provide, so
-        // refuse it rather than hope. A backend with a JSON library should
-        // overwrite the field instead.
-        if (!injected.isEmpty() && trimmed.contains("\"merchant_id\"")) {
-            respond(exchange, 400,
-                    "{\"error\": \"do not send merchant_id; the proxy sets it from your "
-                            + "credentials\"}");
-            return null;
+        // copy of a field this proxy stamps would survive as a duplicate
+        // key and whichever the upstream parser prefers would win - most
+        // take the last, which is the caller's. That inverts the control,
+        // so refuse rather than hope. Only the fields actually being
+        // injected are refused: with SEEL_MERCHANT_ID unset nothing is
+        // stamped and the caller must supply merchant_id themselves. A
+        // backend with a JSON library should overwrite instead of splicing.
+        for (String field : new String[] {"merchant_id", "type"}) {
+            if (injected.contains("\"" + field + "\":") && trimmed.contains("\"" + field + "\"")) {
+                respond(exchange, 400,
+                        "{\"error\": \"do not send " + field + "; the proxy sets it from "
+                                + "your credentials\"}");
+                return null;
+            }
         }
         if (injected.isEmpty()) {
             return trimmed;
@@ -382,14 +447,19 @@ public class ExampleServer {
     /**
      * Call Seel and mirror the result back to the caller.
      *
-     * <p>Pass checkContract when the request carried a seel_services array,
-     * so a 200 that minted no contract is reported rather than echoed as
-     * success.
      */
     private static void forward(HttpExchange exchange, String label, SeelCall call)
             throws IOException {
         forward(exchange, label, call, false);
     }
+
+    /**
+     * As above, but pass checkContract when the request carried a non-empty
+     * seel_services array, so a 200 that minted no contract is reported
+     * rather than echoed as success. Use
+     * {@link SeelValidation#carriesCoverage} to decide - an order with no
+     * coverage is a normal sync and must not be flagged.
+     */
 
     private static void forward(
             HttpExchange exchange, String label, SeelCall call, boolean checkContract)

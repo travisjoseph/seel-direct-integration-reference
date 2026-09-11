@@ -69,7 +69,6 @@ const QUOTE_TYPE = process.env.SEEL_QUOTE_TYPE || "";
 
 const client = new SeelClient(API_KEY, BASE_URL);
 
-// Route patterns, mirroring Seel's real paths, prefix included.
 // Routes mirror Seel's real paths, prefix included, so a caller already
 // written against Seel moves onto a platform by changing the base URL and
 // nothing else. The clients build "<base>/v1/ecommerce/...", so anything
@@ -93,6 +92,14 @@ const FULFILLMENT_PATH = /^\/v1\/ecommerce\/orders\/([^/]+)\/fulfillments\/([^/]
  * 500. With one API key shared across retailers this is a privilege
  * boundary, not a cosmetic check.
  */
+// Segments that are Seel endpoints in their own right and so can never be
+// an order id. Seel's own collection endpoints live alongside order ids, so
+// an id that equals one of them would reach the collection instead.
+// "batch" is POST /v1/ecommerce/orders/batch, the order-history backfill:
+// routed as an order id it would proxy an unstamped, unvalidated batch
+// write.
+const RESERVED_PATH_SEGMENTS = new Set(["batch"]);
+
 function safePathParam(raw) {
   let decoded;
   try {
@@ -101,6 +108,7 @@ function safePathParam(raw) {
     return null; // malformed percent-escape
   }
   if (decoded.includes("/")) return null;
+  if (RESERVED_PATH_SEGMENTS.has(decoded)) return null;
   for (const ch of decoded) {
     const code = ch.codePointAt(0);
     if (code < 0x20 || code === 0x7f) return null;

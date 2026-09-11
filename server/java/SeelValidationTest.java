@@ -39,6 +39,11 @@ public class SeelValidationTest {
         int passed = 0;
         List<String> failures = new ArrayList<>();
 
+        @SuppressWarnings("unchecked")
+        List<Object> contractCases = (List<Object>) doc.get("contract_cases");
+        @SuppressWarnings("unchecked")
+        List<Object> uncovered = (List<Object>) doc.get("uncovered_requests");
+
         for (Object entry : cases) {
             @SuppressWarnings("unchecked")
             Map<String, Object> testCase = (Map<String, Object>) entry;
@@ -74,13 +79,47 @@ public class SeelValidationTest {
                 } else {
                     failures.add(name + ": expected " + missing + " in \"" + joined + "\"");
                 }
+                if (problems.isEmpty()) {
+                    failures.add(name + ": expected problems, got none");
+                }
             }
         }
 
+        // The post-condition check on Create Order must agree across ports.
+        // This port scans raw JSON, so the fixture ships the same values
+        // pre-serialized.
+        for (Object entry : contractCases) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> testCase = (Map<String, Object>) entry;
+            String name = (String) testCase.get("name");
+            String responseJson = (String) testCase.get("response_json");
+            boolean minted = SeelValidation.contractNotMintedReason(responseJson) == null;
+            if (minted == Boolean.TRUE.equals(testCase.get("expect_minted"))) {
+                passed++;
+            } else {
+                failures.add("contract: " + name + ": expected minted="
+                        + testCase.get("expect_minted") + ", got " + minted);
+            }
+        }
+
+        for (Object entry : uncovered) {
+            @SuppressWarnings("unchecked")
+            Map<String, Object> testCase = (Map<String, Object>) entry;
+            String name = (String) testCase.get("name");
+            boolean checked = SeelValidation.carriesCoverage((String) testCase.get("request_json"));
+            if (checked == Boolean.TRUE.equals(testCase.get("expect_checked"))) {
+                passed++;
+            } else {
+                failures.add("gating: " + name + ": expected checked="
+                        + testCase.get("expect_checked") + ", got " + checked);
+            }
+        }
+
+        int total = cases.size() + contractCases.size() + uncovered.size();
         for (String failure : failures) {
             System.out.println("FAIL  " + failure);
         }
-        System.out.println(passed + "/" + cases.size() + " shared validation cases passed");
+        System.out.println(passed + "/" + total + " shared cases passed");
         if (!failures.isEmpty()) {
             System.exit(1);
         }

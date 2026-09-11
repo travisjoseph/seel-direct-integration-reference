@@ -13,14 +13,19 @@ import pathlib
 import unittest
 
 from seel_client import (
+    SeelClient,
+    SeelContractNotMintedError,
     validate_merchant_payload,
     validate_order_payload,
     validate_quote_payload,
 )
 
-CASES = json.loads(
+FIXTURE = json.loads(
     (pathlib.Path(__file__).resolve().parent.parent / "validation-cases.json").read_text()
-)["cases"]
+)
+CASES = FIXTURE["cases"]
+CONTRACT_CASES = FIXTURE["contract_cases"]
+UNCOVERED = FIXTURE["uncovered_requests"]
 
 VALIDATORS = {
     "quote": validate_quote_payload,
@@ -38,8 +43,30 @@ class SharedValidationCases(unittest.TestCase):
                 if case.get("expect_clean"):
                     self.assertEqual(problems, [], f"expected no problems, got {problems}")
                 else:
+                    self.assertTrue(problems, "expected problems, got none")
                     for fragment in case["expect_contains"]:
                         self.assertIn(fragment, joined)
+
+
+class SharedContractCases(unittest.TestCase):
+    """The post-condition check on Create Order must agree across ports."""
+
+    def test_contract_cases(self):
+        for case in CONTRACT_CASES:
+            with self.subTest(case=case["name"]):
+                try:
+                    SeelClient._check_contract_minted(case["request"], case["response"])
+                    minted = True
+                except SeelContractNotMintedError:
+                    minted = False
+                self.assertEqual(minted, case["expect_minted"])
+
+    def test_check_only_runs_when_coverage_was_attached(self):
+        for case in UNCOVERED:
+            with self.subTest(case=case["name"]):
+                services = case["request"].get("seel_services")
+                checked = bool(isinstance(services, list) and services)
+                self.assertEqual(checked, case["expect_checked"])
 
 
 if __name__ == "__main__":

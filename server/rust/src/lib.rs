@@ -53,6 +53,14 @@ pub fn path_param(value: &str) -> String {
 /// escape is rejected rather than silently substituted, so every port
 /// answers the same way. With one API key shared across retailers this is a
 /// privilege boundary, not a cosmetic check.
+/// Segments that are Seel endpoints in their own right and so can never be
+/// an order id. Seel's own collection endpoints live alongside order ids,
+/// so an id that equals one of them would reach the collection instead.
+/// `batch` is `POST /v1/ecommerce/orders/batch`, the order-history
+/// backfill: routed as an order id it would proxy an unstamped,
+/// unvalidated batch write.
+pub const RESERVED_PATH_SEGMENTS: &[&str] = &["batch"];
+
 pub fn safe_path_param(raw: &str) -> Option<String> {
     let bytes = raw.as_bytes();
     let mut out: Vec<u8> = Vec::with_capacity(bytes.len());
@@ -70,6 +78,9 @@ pub fn safe_path_param(raw: &str) -> Option<String> {
     }
     let decoded = String::from_utf8(out).ok()?;
     if decoded.contains('/') || decoded.chars().any(|c| (c as u32) < 0x20 || c as u32 == 0x7F) {
+        return None;
+    }
+    if RESERVED_PATH_SEGMENTS.contains(&decoded.as_str()) {
         return None;
     }
     Some(decoded)
@@ -182,10 +193,10 @@ pub enum SeelError {
     /// Seel requires, or a shape the API accepts and then fails on. Carries
     /// every problem at once rather than one 400 at a time.
     Validation { operation: String, problems: Vec<String> },
-    /// `create_order` returned 200 but no contract was created. Seel reports
-    /// a failed attach as `contract_id: null` on an otherwise successful
-    /// response, so without this check an integration looks healthy while
-    /// covering nothing.
+    /// `create_order` returned 200 but no contract was created. Every
+    /// failed attach observed so far is `contract_id: null` on an otherwise
+    /// successful response rather than a status code, so without this check
+    /// an integration looks healthy while covering nothing.
     ContractNotMinted { detail: String, response: Box<Value> },
 }
 
@@ -880,6 +891,36 @@ mod tests {
         }
     }
 
+    /// The post-condition check on Create Order must agree across ports.
+    #[test]
+    fn shared_contract_cases() {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/../validation-cases.json");
+        let doc: Value = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+
+        for case in doc["contract_cases"].as_array().expect("contract_cases") {
+            let name = case["name"].as_str().unwrap_or("<unnamed>");
+            let minted =
+                SeelClient::check_contract_minted(&case["request"], &case["response"]).is_ok();
+            assert_eq!(
+                minted,
+                case["expect_minted"].as_bool().expect("expect_minted"),
+                "{name}"
+            );
+        }
+
+        for case in doc["uncovered_requests"].as_array().expect("uncovered_requests") {
+            let name = case["name"].as_str().unwrap_or("<unnamed>");
+            let checked = case["request"]["seel_services"]
+                .as_array()
+                .is_some_and(|s| !s.is_empty());
+            assert_eq!(
+                checked,
+                case["expect_checked"].as_bool().expect("expect_checked"),
+                "{name}"
+            );
+        }
+    }
+
     #[test]
     fn path_param_encodes_separators() {
         assert_eq!(path_param("ORD1"), "ORD1");
@@ -895,6 +936,8 @@ mod tests {
         assert_eq!(safe_path_param("ORD1%2Fcancel"), None); // decoded slash
         assert_eq!(safe_path_param("a%00b"), None); // control character
         assert_eq!(safe_path_param("%zz"), None); // malformed escape
+        assert_eq!(safe_path_param("%FF"), None); // invalid UTF-8
+        assert_eq!(safe_path_param("batch"), None); // Seel's own batch endpoint
     }
 
     #[test]
@@ -916,7 +959,9 @@ mod tests {
         assert_eq!(parse_route("/webhooks/seel"), Route::Webhook);
     }
 
-    /// These are the cases the four ports disagreed on before this change.
+    /// Cases where the ports could plausibly diverge. The other three
+    /// match on regexes or split segments, and the shared fixture does not
+    /// reach routing, so these are the local guard against that.
     #[test]
     fn route_edge_cases() {
         // A query string must not change routing.

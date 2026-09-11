@@ -70,7 +70,6 @@ QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
 
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
 
-# Route patterns, mirroring Seel's real paths, prefix included.
 # Routes mirror Seel's real paths, prefix included, so a caller already
 # written against Seel moves onto a platform by changing the base URL and
 # nothing else. The clients build "<base>/v1/ecommerce/...", so anything
@@ -82,6 +81,14 @@ ORDER_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)$")
 ORDER_CANCEL_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/cancel$")
 FULFILLMENTS_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/fulfillments$")
 FULFILLMENT_PATH = re.compile(r"^/v1/ecommerce/orders/([^/]+)/fulfillments/([^/]+)$")
+
+
+# Segments that are Seel endpoints in their own right and so can never be
+# an order id. Seel's own collection endpoints live alongside order ids, so an id
+# that equals one of them would reach the collection instead. "batch" is
+# POST /v1/ecommerce/orders/batch, the order-history backfill: routed as an
+# order id it would proxy an unstamped, unvalidated batch write.
+RESERVED_PATH_SEGMENTS = {"batch"}
 
 
 def safe_path_param(raw: str):
@@ -105,8 +112,15 @@ def safe_path_param(raw: str):
             i += 3
         else:
             i += 1
-    decoded = unquote(raw)
+    # errors="strict" so invalid UTF-8 is refused rather than replaced with
+    # U+FFFD and forwarded, which Node and Rust reject.
+    try:
+        decoded = unquote(raw, errors="strict")
+    except UnicodeDecodeError:
+        return None
     if "/" in decoded or any(ord(c) < 0x20 or ord(c) == 0x7F for c in decoded):
+        return None
+    if decoded in RESERVED_PATH_SEGMENTS:
         return None
     return decoded
 
@@ -149,7 +163,7 @@ def resolve_merchant_id(params: dict) -> str:
 
 
 def handle_webhook_event(event: dict) -> None:
-    """Internal fan-out.
+    """Route a delivered webhook into your own systems.
 
     Before any of this fires, the endpoint has to be registered with Seel.
     Seel has no self-serve way to register this URL. There is no webhook field on

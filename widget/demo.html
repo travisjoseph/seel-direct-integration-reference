@@ -42,7 +42,13 @@
       currency_code: "USD",
       currency_symbol: "$",
       display_amounts: { price: "$2.99 USD" },
-      eligible_items: [{ product_id: "prod_001", variant_id: "variant_001", coverages: [{ coverage_type: "gdd" }] }],
+      // Top level, as the API returns it. An accepted quote with an empty
+      // coverages array means nothing was eligible, and the widget treats
+      // that as no offer rather than rendering a free one.
+      coverages: [
+        { coverage_type: "gdd", price: 2.99, eligible_items: [{ line_item_id: "line_001", quantity: 1 }] }
+      ],
+      eligible_items: [{ product_id: "prod_001", variant_id: "variant_001" }],
       extra_info: {
         display_widget_text: ["Get a full refund if the order doesn't arrive as described, plus extended returns"],
         opt_out_warning_text: "No protection: lost or damaged packages may not be covered",
@@ -91,11 +97,12 @@
       document.getElementById("total").textContent = "$120.00";
     });
 
-    // The Quote API requires more fields than you might expect:
-    // allocated_discounts, sales_tax, retail_price, image_urls,
-    // category_1..4, shipping_origin (with state + country), and
-    // shipping_address.state. It also enforces
-    // price + sales_tax - allocated_discounts === final_price.
+    // The Quote API requires more fields than you might expect, including
+    // allocated_discounts, sales_tax, image_urls, category_1, category_2
+    // and shipping_origin.country. It also enforces
+    // price + sales_tax - allocated_discounts === final_price. See
+    // "Validation rules" in the README for the measured set rather than
+    // trusting this list, which is a summary and will age.
     // Each program has its own quote type; the API rejects any other with
     // an error naming the allowed ones.
     // Full reference: https://developer.seel.com/reference/createquote

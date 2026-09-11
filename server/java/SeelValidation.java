@@ -173,8 +173,11 @@ public final class SeelValidation {
 
     private static final Pattern SEEL_SERVICES_NULL =
             Pattern.compile("\"seel_services\"\\s*:\\s*null");
-    private static final Pattern CONTRACT_ID_NULL =
-            Pattern.compile("\"contract_id\"\\s*:\\s*(null|\"\")");
+    private static final Pattern CONTRACT_ID_FALSY =
+            Pattern.compile("\"contract_id\"\\s*:\\s*(null|\"\"|0|false)(?![0-9.])");
+    /** A seel_services array with at least one entry. */
+    private static final Pattern SEEL_SERVICES_NONEMPTY =
+            Pattern.compile("\"seel_services\"\\s*:\\s*\\[\\s*\\{");
 
     /**
      * Return why a Create Order response carries no contract, or null if it
@@ -184,6 +187,10 @@ public final class SeelValidation {
      * successful 200 - there is no error status code - so a caller that
      * trusts the status code believes it has coverage when it has none.
      *
+     * <p>Pair it with {@link #carriesCoverage} on the request: an order
+     * with no seel_services, or an empty array, is a normal uncovered sync
+     * and must not be reported as a failure.
+     *
      * <p>This scans the raw response text rather than parsing it, because
      * SeelClient is deliberately dependency-free. That makes it a
      * best-effort check, not a parser: it will not understand a
@@ -191,6 +198,10 @@ public final class SeelValidation {
      * request actually carried a seel_services array. With a JSON library
      * available, read seel_services[].contract_id directly instead.
      */
+    public static boolean carriesCoverage(String requestJson) {
+        return requestJson != null && SEEL_SERVICES_NONEMPTY.matcher(requestJson).find();
+    }
+
     public static String contractNotMintedReason(String responseJson) {
         if (responseJson == null || responseJson.isEmpty()) {
             return "empty response body";
@@ -199,8 +210,10 @@ public final class SeelValidation {
             return "response seel_services is null - check seel_services is an array and "
                     + "quote_id is inside it, not at the top level";
         }
-        Matcher m = CONTRACT_ID_NULL.matcher(responseJson);
+        Matcher m = CONTRACT_ID_FALSY.matcher(responseJson);
         if (m.find()) {
+            // Falsy means not minted, matching the other ports: null, "",
+            // 0 and false all mean no contract.
             return "a seel_services entry returned contract_id " + m.group(1);
         }
         if (!responseJson.contains("contract_id")) {
