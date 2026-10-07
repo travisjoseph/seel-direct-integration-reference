@@ -47,15 +47,22 @@
 //! 2. in widget/demo.html, replace the mock quoteFetcher with
 //!    configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 
-use std::io::Read;
+use std::convert::Infallible;
 use std::sync::Arc;
-use std::thread;
+use std::time::Duration;
 
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use hyper::body::{Body, Bytes, Incoming};
+use hyper::http::request::Parts;
+use hyper::server::conn::http1;
+use hyper::service::service_fn;
+use hyper::{Method, Request, Response};
+use hyper_util::rt::{TokioIo, TokioTimer};
 use seel_direct_integration_reference::{
     parse_route, verify_webhook_signature, Route, SeelClient, SeelError, SANDBOX_BASE_URL,
 };
 use serde_json::{json, Value};
-use tiny_http::{Header, Method, Request, Response, Server};
+use tokio::net::TcpListener;
 
 struct Config {
     client: SeelClient,
@@ -87,46 +94,50 @@ fn handle_webhook_event(event: &Value) {
     println!("[webhook] {event_type} id={event_id}");
 }
 
-/// Build a header from static name/value bytes (always well-formed).
-fn header(name: &[u8], value: &[u8]) -> Header {
-    match Header::from_bytes(name, value) {
-        Ok(h) => h,
-        Err(()) => unreachable!("static header bytes are always well-formed"),
-    }
-}
+type Reply = Response<Full<Bytes>>;
 
-fn respond_json(request: Request, status: u16, body: &Value) {
-    let response = Response::from_string(body.to_string())
-        .with_status_code(status)
-        .with_header(header(b"Content-Type", b"application/json"))
+fn json_response(status: u16, body: &Value) -> Reply {
+    Response::builder()
+        .status(status)
+        .header("Content-Type", "application/json")
         // Demo only; lock down in prod.
-        .with_header(header(b"Access-Control-Allow-Origin", b"*"));
-    if let Err(err) = request.respond(response) {
-        eprintln!("failed to send response: {err}");
-    }
+        .header("Access-Control-Allow-Origin", "*")
+        .body(Full::new(Bytes::from(body.to_string())))
+        .unwrap_or_else(|err| unreachable!("static headers and a u16 status are always well-formed: {err}"))
 }
 
 /// CORS preflight for the demo page.
-fn respond_preflight(request: Request) {
-    let response = Response::empty(204)
+fn preflight_response() -> Reply {
+    Response::builder()
+        .status(204)
         // Demo only; lock down in prod.
-        .with_header(header(b"Access-Control-Allow-Origin", b"*"))
-        .with_header(header(b"Access-Control-Allow-Headers", b"Content-Type"))
-        .with_header(header(b"Access-Control-Allow-Methods", b"POST, OPTIONS"));
-    if let Err(err) = request.respond(response) {
-        eprintln!("failed to send response: {err}");
-    }
+        .header("Access-Control-Allow-Origin", "*")
+        .header("Access-Control-Allow-Headers", "Content-Type")
+        .header("Access-Control-Allow-Methods", "POST, OPTIONS")
+        .body(Full::new(Bytes::new()))
+        .unwrap_or_else(|err| unreachable!("static headers are always well-formed: {err}"))
 }
 
 /// The largest request body any route accepts. A quote or order payload is
 /// a few KB; without a cap one 200 MB POST sits in this process's memory.
 const MAX_BODY_BYTES: usize = 1 << 20;
 
+/// How long a client gets to finish sending its headers, and then its body.
+/// A client that trickles bytes forever would otherwise hold its connection
+/// task open for as long as it likes.
+const HEADER_READ_TIMEOUT: Duration = Duration::from_secs(10);
+const BODY_READ_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Why a request body was not accepted, with the status it answers.
 #[derive(Debug)]
 struct BodyReject {
     status: u16,
     error: String,
+    /// Part of the body is still in the socket. The connection has to
+    /// close then: hyper would otherwise parse what remains as the next
+    /// request, which is how a request hidden inside an oversized chunk
+    /// could run.
+    unread: bool,
 }
 
 impl BodyReject {
@@ -134,47 +145,59 @@ impl BodyReject {
         BodyReject {
             status: 413,
             error: format!("request body exceeds {MAX_BODY_BYTES} bytes"),
+            unread: true,
         }
     }
 
+    fn unreadable() -> Self {
+        BodyReject { status: 400, error: "could not read request body".to_string(), unread: true }
+    }
+
+    fn timed_out() -> Self {
+        BodyReject {
+            status: 408,
+            error: format!("request body not received within {}s", BODY_READ_TIMEOUT.as_secs()),
+            unread: true,
+        }
+    }
+
+    /// The body arrived in full and is not usable.
     fn bad_request(error: &str) -> Self {
-        BodyReject { status: 400, error: error.to_string() }
+        BodyReject { status: 400, error: error.to_string(), unread: false }
+    }
+
+    fn into_response(self) -> Reply {
+        let mut response = json_response(self.status, &json!({ "error": self.error }));
+        if self.unread {
+            response.headers_mut().insert("Connection", "close".parse().expect("static header value"));
+        }
+        response
     }
 }
 
-/// Read a body of at most `MAX_BODY_BYTES`. The declared Content-Length
-/// is refused up front so nothing is read; a chunked or lying body is cut
-/// off while reading.
-fn read_capped(declared_length: Option<usize>, reader: &mut dyn Read) -> Result<Vec<u8>, BodyReject> {
-    if declared_length.is_some_and(|n| n > MAX_BODY_BYTES) {
+/// Read a body of at most `MAX_BODY_BYTES`. A declared Content-Length over
+/// the cap is refused up front so nothing is read; a chunked or lying body
+/// is cut off while reading.
+async fn read_capped<B>(body: B) -> Result<Vec<u8>, BodyReject>
+where
+    B: Body<Data = Bytes>,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    if body.size_hint().lower() > MAX_BODY_BYTES as u64 {
         return Err(BodyReject::too_large());
     }
-    let mut body = Vec::new();
-    reader
-        .take(MAX_BODY_BYTES as u64 + 1)
-        .read_to_end(&mut body)
-        .map_err(|_| BodyReject::bad_request("could not read request body"))?;
-    if body.len() > MAX_BODY_BYTES {
-        return Err(BodyReject::too_large());
+    match Limited::new(body, MAX_BODY_BYTES).collect().await {
+        Ok(collected) => Ok(collected.to_bytes().to_vec()),
+        Err(err) if err.is::<LengthLimitError>() => Err(BodyReject::too_large()),
+        Err(_) => Err(BodyReject::unreadable()),
     }
-    Ok(body)
 }
 
-fn read_body(request: &mut Request) -> Result<Vec<u8>, BodyReject> {
-    let result = read_capped(request.body_length(), request.as_reader());
-    // A refused body has to be consumed to its end here. tiny_http 0.12
-    // parses whatever is left in the socket as the next request on the
-    // connection, and gives a handler no way to close it instead: close is
-    // decided from the request's own headers only, and a Connection header
-    // on the response is discarded. Leaving a chunked remainder in place
-    // let a request hidden inside an oversized chunk run. Draining in 8 KB
-    // steps also sidesteps EqualReader::drop, which otherwise allocates the
-    // whole remaining Content-Length at once. The cost is that the 413
-    // lands only once the body has.
-    if result.is_err() {
-        let _ = std::io::copy(request.as_reader(), &mut std::io::sink());
+async fn read_body(body: Incoming) -> Result<Vec<u8>, BodyReject> {
+    match tokio::time::timeout(BODY_READ_TIMEOUT, read_capped(body)).await {
+        Ok(result) => result,
+        Err(_) => Err(BodyReject::timed_out()),
     }
-    result
 }
 
 /// Decide whether the caller may use this proxy.
@@ -188,7 +211,7 @@ fn read_body(request: &mut Request) -> Result<Vec<u8>, BodyReject> {
 /// other. A real implementation returns the caller's identity rather than
 /// a bool, and [`resolve_merchant_id`] takes it - changing both signatures
 /// is part of the work.
-fn authenticate_caller(_request: &Request) -> bool {
+fn authenticate_caller(_head: &Parts) -> bool {
     true
 }
 
@@ -282,16 +305,29 @@ fn map_result(label: &str, result: Result<Value, SeelError>) -> (u16, Value) {
     }
 }
 
-fn respond_result(request: Request, label: &str, result: Result<Value, SeelError>) {
+/// Run one blocking client call on tokio's blocking pool, so a slow Seel
+/// round trip never stalls the connection tasks sharing this runtime.
+async fn call_seel<F>(config: &Arc<Config>, call: F) -> Result<Value, SeelError>
+where
+    F: FnOnce(&SeelClient) -> Result<Value, SeelError> + Send + 'static,
+{
+    let config = Arc::clone(config);
+    match tokio::task::spawn_blocking(move || call(&config.client)).await {
+        Ok(result) => result,
+        Err(err) => Err(SeelError::Io(std::io::Error::other(format!("client call aborted: {err}")))),
+    }
+}
+
+fn result_response(label: &str, result: Result<Value, SeelError>) -> Reply {
     let (status, body) = map_result(label, result);
-    respond_json(request, status, &body);
+    json_response(status, &body)
 }
 
 /// Read and parse a JSON object body, or return the rejection to send back.
-fn read_json_object(request: &mut Request) -> Result<Value, BodyReject> {
+async fn read_json_object(body: Incoming) -> Result<Value, BodyReject> {
     // A body that never fully arrived is not the same as a malformed one,
     // and saying so would send the caller looking at the wrong thing.
-    let raw = read_body(request)?;
+    let raw = read_body(body).await?;
     let parsed: Value = serde_json::from_slice(&raw)
         .map_err(|_| BodyReject::bad_request("request body must be JSON"))?;
     if parsed.is_object() {
@@ -301,17 +337,10 @@ fn read_json_object(request: &mut Request) -> Result<Value, BodyReject> {
     }
 }
 
-fn respond_reject(request: Request, reject: BodyReject) {
-    respond_json(request, reject.status, &json!({ "error": reject.error }));
-}
-
-fn handle_quote(mut request: Request, config: &Config) {
-    let mut params = match read_json_object(&mut request) {
+async fn handle_quote(body: Incoming, config: &Arc<Config>) -> Reply {
+    let mut params = match read_json_object(body).await {
         Ok(v) => v,
-        Err(reject) => {
-            respond_reject(request, reject);
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
     let merchant_id = resolve_merchant_id(config, &params);
     if let Some(obj) = params.as_object_mut() {
@@ -322,20 +351,17 @@ fn handle_quote(mut request: Request, config: &Config) {
             obj.insert("type".to_string(), Value::String(config.quote_type.clone()));
         }
     }
-    let result = config.client.create_quote(&params);
-    respond_result(request, "quote", result);
+    let result = call_seel(config, move |client| client.create_quote(&params)).await;
+    result_response("quote", result)
 }
 
 /// Sync every order, opted in or not. On opt-in the body carries
 /// seel_services with the quote_id and price, which mints the contract and
 /// fires contract.created.
-fn handle_create_order(mut request: Request, config: &Config) {
-    let mut params = match read_json_object(&mut request) {
+async fn handle_create_order(body: Incoming, config: &Arc<Config>) -> Reply {
+    let mut params = match read_json_object(body).await {
         Ok(v) => v,
-        Err(reject) => {
-            respond_reject(request, reject);
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
     let merchant_id = resolve_merchant_id(config, &params);
     if let Some(obj) = params.as_object_mut() {
@@ -343,133 +369,144 @@ fn handle_create_order(mut request: Request, config: &Config) {
             obj.insert("merchant_id".to_string(), Value::String(merchant_id));
         }
     }
-    let result = config.client.create_order(&params);
-    respond_result(request, "order", result);
+    let result = call_seel(config, move |client| client.create_order(&params)).await;
+    result_response("order", result)
 }
 
-fn handle_update_order(mut request: Request, config: &Config, order_id: &str) {
-    let params = match read_json_object(&mut request) {
+async fn handle_update_order(body: Incoming, config: &Arc<Config>, order_id: String) -> Reply {
+    let params = match read_json_object(body).await {
         Ok(v) => v,
-        Err(reject) => {
-            respond_reject(request, reject);
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
-    let result = config.client.update_order(order_id, &params);
-    respond_result(request, "order update", result);
+    let result = call_seel(config, move |client| client.update_order(&order_id, &params)).await;
+    result_response("order update", result)
 }
 
 /// Cancel carries no body.
-fn handle_cancel_order(request: Request, config: &Config, order_id: &str) {
-    let result = config.client.cancel_order(order_id);
-    respond_result(request, "order cancel", result);
+async fn handle_cancel_order(config: &Arc<Config>, order_id: String) -> Reply {
+    let result = call_seel(config, move |client| client.cancel_order(&order_id)).await;
+    result_response("order cancel", result)
 }
 
-fn handle_create_fulfillment(mut request: Request, config: &Config, order_id: &str) {
-    let params = match read_json_object(&mut request) {
+async fn handle_create_fulfillment(body: Incoming, config: &Arc<Config>, order_id: String) -> Reply {
+    let params = match read_json_object(body).await {
         Ok(v) => v,
-        Err(reject) => {
-            respond_reject(request, reject);
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
-    let result = config.client.create_fulfillment(order_id, &params);
-    respond_result(request, "fulfillment", result);
+    let result =
+        call_seel(config, move |client| client.create_fulfillment(&order_id, &params)).await;
+    result_response("fulfillment", result)
 }
 
-fn handle_update_fulfillment(
-    mut request: Request,
-    config: &Config,
-    order_id: &str,
-    fulfillment_id: &str,
-) {
-    let params = match read_json_object(&mut request) {
+async fn handle_update_fulfillment(
+    body: Incoming,
+    config: &Arc<Config>,
+    order_id: String,
+    fulfillment_id: String,
+) -> Reply {
+    let params = match read_json_object(body).await {
         Ok(v) => v,
-        Err(reject) => {
-            respond_reject(request, reject);
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
-    let result = config
-        .client
-        .update_fulfillment(order_id, fulfillment_id, &params);
-    respond_result(request, "fulfillment update", result);
+    let result = call_seel(config, move |client| {
+        client.update_fulfillment(&order_id, &fulfillment_id, &params)
+    })
+    .await;
+    result_response("fulfillment update", result)
 }
 
-fn handle_webhook(mut request: Request, config: &Config) {
+async fn handle_webhook(head: &Parts, body: Incoming, config: &Arc<Config>) -> Reply {
     // An unreadable body can't be verified, so treat it as unsigned. An
-    // oversize one is refused like any other route's.
-    let raw = match read_body(&mut request) {
+    // oversize or stalled one is refused like any other route's.
+    let raw = match read_body(body).await {
         Ok(b) => b,
-        Err(reject) if reject.status == 413 => {
-            respond_reject(request, reject);
-            return;
+        Err(reject) if reject.status == 400 => {
+            return BodyReject { status: 401, error: "invalid signature".to_string(), ..reject }
+                .into_response()
         }
-        Err(_) => {
-            respond_json(request, 401, &json!({"error": "invalid signature"}));
-            return;
-        }
+        Err(reject) => return reject.into_response(),
     };
-    let signature = request
-        .headers()
-        .iter()
-        .find(|h| h.field.equiv("X-Seel-Hmac-SHA256"))
-        .map(|h| h.value.as_str().to_string())
+    let signature = head
+        .headers
+        .get("X-Seel-Hmac-SHA256")
+        .and_then(|v| v.to_str().ok())
         .unwrap_or_default();
     // An empty secret is a valid HMAC key, so without this check an
     // unconfigured server authenticates anyone who signs with "".
     if config.webhook_secret.is_empty()
-        || !verify_webhook_signature(&raw, &signature, &config.webhook_secret)
+        || !verify_webhook_signature(&raw, signature, &config.webhook_secret)
     {
-        respond_json(request, 401, &json!({"error": "invalid signature"}));
-        return;
+        return json_response(401, &json!({"error": "invalid signature"}));
     }
-    // ACK and flush before doing any work: Seel retries anything not
-    // answered with a 200 within 10 seconds. respond() writes and flushes
-    // the full response before returning.
-    respond_json(request, 200, &json!({"ok": true}));
-    // Already ACKed; never let a processing failure escape this handler.
-    match serde_json::from_slice::<Value>(&raw) {
-        Ok(event) => handle_webhook_event(&event),
-        Err(err) => eprintln!("[webhook] processing error: {err}"),
-    }
+    // ACK before doing any work: Seel retries anything not answered with a
+    // 200 within 10 seconds, so processing runs on its own task, where it
+    // can neither delay nor fail the response.
+    tokio::task::spawn_blocking(move || {
+        match serde_json::from_slice::<Value>(&raw) {
+            Ok(event) => handle_webhook_event(&event),
+            Err(err) => eprintln!("[webhook] processing error: {err}"),
+        }
+    });
+    json_response(200, &json!({"ok": true}))
 }
 
-fn handle_request(request: Request, config: &Config) {
-    // Copy method and URL out first: the handlers consume the request when
-    // they respond.
-    let method = request.method().clone();
-    let url = request.url().to_string();
-    if method == Method::Options {
-        respond_preflight(request);
-        return;
+async fn handle_request(request: Request<Incoming>, config: Arc<Config>) -> Result<Reply, Infallible> {
+    let (head, body) = request.into_parts();
+    if head.method == Method::OPTIONS {
+        return Ok(preflight_response());
     }
-    if method != Method::Post {
-        respond_json(request, 404, &json!({"error": "not found"}));
-        return;
+    if head.method != Method::POST {
+        return Ok(json_response(404, &json!({"error": "not found"})));
     }
 
-    let route = parse_route(&url);
+    let route = parse_route(head.uri.path());
     // The webhook route is authenticated by its HMAC signature instead.
-    if !matches!(route, Route::Webhook) && !authenticate_caller(&request) {
-        respond_json(request, 401, &json!({"error": "unauthorized"}));
-        return;
+    if !matches!(route, Route::Webhook) && !authenticate_caller(&head) {
+        return Ok(json_response(401, &json!({"error": "unauthorized"})));
     }
 
-    match route {
-        Route::Quote => handle_quote(request, config),
-        Route::Webhook => handle_webhook(request, config),
-        Route::CreateOrder => handle_create_order(request, config),
-        Route::UpdateOrder(id) => handle_update_order(request, config, &id),
-        Route::CancelOrder(id) => handle_cancel_order(request, config, &id),
-        Route::CreateFulfillment(id) => handle_create_fulfillment(request, config, &id),
+    Ok(match route {
+        Route::Quote => handle_quote(body, &config).await,
+        Route::Webhook => handle_webhook(&head, body, &config).await,
+        Route::CreateOrder => handle_create_order(body, &config).await,
+        Route::UpdateOrder(id) => handle_update_order(body, &config, id).await,
+        Route::CancelOrder(id) => handle_cancel_order(&config, id).await,
+        Route::CreateFulfillment(id) => handle_create_fulfillment(body, &config, id).await,
         Route::UpdateFulfillment(id, fid) => {
-            handle_update_fulfillment(request, config, &id, &fid)
+            handle_update_fulfillment(body, &config, id, fid).await
         }
-        Route::BadPathParam => {
-            respond_json(request, 400, &json!({"error": "invalid order id in path"}))
-        }
-        Route::NotFound => respond_json(request, 404, &json!({"error": "not found"})),
+        Route::BadPathParam => json_response(400, &json!({"error": "invalid order id in path"})),
+        Route::NotFound => json_response(404, &json!({"error": "not found"})),
+    })
+}
+
+async fn serve(listener: TcpListener, config: Arc<Config>) {
+    loop {
+        let stream = match listener.accept().await {
+            Ok((stream, _)) => stream,
+            Err(err) => {
+                eprintln!("accept failed: {err}");
+                continue;
+            }
+        };
+        let config = Arc::clone(&config);
+        // One task per connection, so webhook deliveries do not queue
+        // behind each other.
+        tokio::spawn(async move {
+            let service = service_fn(move |request| handle_request(request, Arc::clone(&config)));
+            let served = http1::Builder::new()
+                .timer(TokioTimer::new())
+                .header_read_timeout(HEADER_READ_TIMEOUT)
+                .serve_connection(TokioIo::new(stream), service)
+                .await;
+            // A client that stops mid-request or idles past the header
+            // timeout is routine, not a fault worth a log line.
+            if let Err(err) = served {
+                if !err.is_incomplete_message() && !err.is_timeout() {
+                    eprintln!("connection error: {err}");
+                }
+            }
+        });
     }
 }
 
@@ -495,50 +532,109 @@ fn main() {
         quote_type: env_or("SEEL_QUOTE_TYPE", ""),
     });
 
-    let server = match Server::http((host.as_str(), port)) {
-        Ok(s) => s,
+    let runtime = match tokio::runtime::Runtime::new() {
+        Ok(r) => r,
         Err(err) => {
-            eprintln!("failed to bind {host}:{port}: {err}");
+            eprintln!("failed to start runtime: {err}");
             std::process::exit(1);
         }
     };
-    println!("listening on http://{host}:{port}");
-
-    // Handle each request on its own thread so webhook deliveries do not
-    // queue behind each other.
-    for request in server.incoming_requests() {
-        let config = Arc::clone(&config);
-        thread::spawn(move || handle_request(request, &config));
-    }
+    runtime.block_on(async {
+        let listener = match TcpListener::bind((host.as_str(), port)).await {
+            Ok(l) => l,
+            Err(err) => {
+                eprintln!("failed to bind {host}:{port}: {err}");
+                std::process::exit(1);
+            }
+        };
+        println!("listening on http://{host}:{port}");
+        serve(listener, config).await
+    });
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hyper::body::{Frame, SizeHint};
     use seel_direct_integration_reference::SeelApiError;
-    use std::io::Cursor;
+    use std::collections::VecDeque;
+    use std::pin::Pin;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::task::{Context, Poll};
+
+    /// A body that serves fixed frames and counts how many were taken, with
+    /// a declared length that may lie, like a Content-Length header can.
+    struct FakeBody {
+        declared: Option<u64>,
+        frames: VecDeque<Bytes>,
+        polled: Arc<AtomicUsize>,
+    }
+
+    impl Body for FakeBody {
+        type Data = Bytes;
+        type Error = Infallible;
+
+        fn poll_frame(
+            mut self: Pin<&mut Self>,
+            _cx: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            self.polled.fetch_add(1, Ordering::SeqCst);
+            Poll::Ready(self.frames.pop_front().map(|b| Ok(Frame::data(b))))
+        }
+
+        fn size_hint(&self) -> SizeHint {
+            self.declared.map(SizeHint::with_exact).unwrap_or_default()
+        }
+    }
+
+    fn fake(declared: Option<u64>, frames: Vec<Bytes>) -> (FakeBody, Arc<AtomicUsize>) {
+        let polled = Arc::new(AtomicUsize::new(0));
+        (FakeBody { declared, frames: frames.into(), polled: Arc::clone(&polled) }, polled)
+    }
+
+    fn block_on<F: std::future::Future>(f: F) -> F::Output {
+        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+    }
 
     #[test]
     fn body_cap_refuses_declared_length_without_reading() {
-        let mut never_read = Cursor::new(vec![b'a'; 8]);
-        let reject = read_capped(Some(MAX_BODY_BYTES + 1), &mut never_read).err().unwrap();
+        let (never_read, polled) = fake(Some(MAX_BODY_BYTES as u64 + 1), vec![Bytes::from("a")]);
+        let reject = block_on(read_capped(never_read)).err().unwrap();
         assert_eq!(reject.status, 413);
         assert_eq!(reject.error, "request body exceeds 1048576 bytes");
-        assert_eq!(never_read.position(), 0);
-        assert!(read_capped(Some(MAX_BODY_BYTES), &mut Cursor::new(vec![])).is_ok());
+        assert_eq!(polled.load(Ordering::SeqCst), 0);
+
+        let (exact, _) = fake(Some(MAX_BODY_BYTES as u64), vec![Bytes::from(vec![b'a'; MAX_BODY_BYTES])]);
+        assert!(block_on(read_capped(exact)).is_ok());
     }
 
     /// A chunked body declares no length, so the cap has to hold while
     /// reading, and stop reading once it is passed.
     #[test]
     fn body_cap_holds_while_reading_an_undeclared_length() {
-        let mut body = Cursor::new(vec![b'a'; 2 * MAX_BODY_BYTES]);
-        let reject = read_capped(None, &mut body).err().unwrap();
+        let frame = Bytes::from(vec![b'a'; MAX_BODY_BYTES / 2]);
+        let (body, polled) = fake(None, vec![frame.clone(); 4]);
+        let reject = block_on(read_capped(body)).err().unwrap();
         assert_eq!(reject.status, 413);
-        assert_eq!(body.position() as usize, MAX_BODY_BYTES + 1);
+        assert_eq!(polled.load(Ordering::SeqCst), 3, "stops at the first frame past the cap");
 
-        let exact = vec![b'a'; MAX_BODY_BYTES];
-        assert_eq!(read_capped(None, &mut Cursor::new(exact.clone())).unwrap(), exact);
+        let (body, _) = fake(None, vec![frame.clone(); 2]);
+        assert_eq!(block_on(read_capped(body)).unwrap(), vec![b'a'; MAX_BODY_BYTES]);
+    }
+
+    /// Only a reject that leaves bytes in the socket closes the connection.
+    #[test]
+    fn only_an_unread_body_closes_the_connection() {
+        for reject in [BodyReject::too_large(), BodyReject::unreadable(), BodyReject::timed_out()] {
+            let status = reject.status;
+            let response = reject.into_response();
+            assert_eq!(response.status(), status);
+            assert_eq!(response.headers()["Connection"], "close", "{status}");
+            assert_eq!(response.headers()["Content-Type"], "application/json");
+        }
+        let response = BodyReject::bad_request("request body must be JSON").into_response();
+        assert_eq!(response.status(), 400);
+        assert!(response.headers().get("Connection").is_none());
     }
 
     #[test]

@@ -20,7 +20,7 @@ fields say `wfp` even where the product is sold as Worry-Free Delivery.
 | `widget/demo.html` | Offline demo with a mocked quote. Open it in a browser. |
 | `server/python/` | Stdlib only. `python3 example_server.py`. The primary copy. |
 | `server/node/` | Node 18+ built-ins. `node example-server.js` |
-| `server/rust/` | Small crate. `cargo run` |
+| `server/rust/` | Small crate: ureq client, hyper example server. `cargo run` |
 | `server/java/` | JDK 17+ only. `javac *.java && java ExampleServer`. See [Java port](#java-port). |
 | `server/validation-cases.json` | Shared test fixture all four ports run. |
 
@@ -137,6 +137,7 @@ Seel's answer from a network problem:
 | Seel's own status | Seel rejected the request. The proxy passes Seel's error body through unchanged, so you see the field it objected to. |
 | `400` | The proxy rejected the request before sending. Validation failures carry a `problems` array listing every fault. Other rejections, such as malformed JSON, carry a plain `error`. |
 | `409` | Seel accepted the order but minted no contract, including a 2xx whose body is not JSON. The order exists upstream, so do not retry it. |
+| `408` | Rust only. The request body did not arrive within 30 seconds. |
 | `413` | The request body is over 1 MiB. |
 | `502` | The proxy got no usable response from Seel. Usually Seel was unreachable and nothing was processed. If the connection dropped partway through Seel's answer, it may have processed the request, so look an order up before retrying it. |
 | `504` | Seel did not answer within 15 seconds. It may have processed the request, so look the order up before retrying. |
