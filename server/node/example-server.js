@@ -38,6 +38,8 @@
  * Run:
  *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... node example-server.js
  *
+ * Listens on 127.0.0.1:8787. Set HOST (and PORT) to bind elsewhere.
+ *
  * To drive the widget demo against a live sandbox, two steps - this server
  * doesn't serve the demo page:
  *   1. run this server
@@ -59,6 +61,11 @@ const {
 } = require("./seel-client");
 
 const PORT = parseInt(process.env.PORT || "8787", 10);
+// Loopback by default: this demo authenticates nobody, so it must not be
+// reachable from the network unless the operator asks for that.
+const HOST = process.env.HOST || "127.0.0.1";
+// Quote and order payloads run to a few KB; anything near this is not one.
+const MAX_BODY_BYTES = 1048576;
 const API_KEY = process.env.SEEL_API_KEY || "";
 const WEBHOOK_SECRET = process.env.SEEL_WEBHOOK_SECRET || "";
 const BASE_URL = process.env.SEEL_BASE_URL || SANDBOX_BASE_URL;
@@ -182,6 +189,14 @@ async function forward(res, label, call) {
       const errBody =
         exc.body !== null && typeof exc.body === "object" ? exc.body : { error: exc.message };
       respond(res, exc.status, errBody);
+    } else if (exc.name === "TimeoutError") {
+      // Seel may have processed the request before the deadline, so a
+      // blind retry can duplicate an order. 504 says so; 502 would read
+      // as "nothing happened".
+      console.log(`[proxy] ${label} timed out after ${client.timeoutMs}ms`);
+      respond(res, 504, {
+        error: "timed out waiting for Seel; the request may have been processed, check before retrying",
+      });
     } else {
       // Log before answering: a bare 502 leaves the operator unable to tell
       // a timeout from a bug in this handler.
@@ -235,10 +250,35 @@ function respond(res, status, body) {
   res.end(data);
 }
 
-function readBody(req) {
+/**
+ * Read the request body, or answer 413 and resolve null once it passes the
+ * cap. Content-Length is checked up front; the running count is what
+ * catches a chunked body, which declares no length.
+ */
+function readBody(req, res) {
+  const tooLarge = () => {
+    // Close instead of draining: the rest of the body is exactly what the
+    // cap exists to avoid reading. Node flushes the response first.
+    res.setHeader("Connection", "close");
+    respond(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES} bytes` });
+  };
+  if (Number(req.headers["content-length"]) > MAX_BODY_BYTES) {
+    tooLarge();
+    return Promise.resolve(null);
+  }
   return new Promise((resolve, reject) => {
     const chunks = [];
-    req.on("data", (chunk) => chunks.push(chunk));
+    let received = 0;
+    req.on("data", (chunk) => {
+      if (received > MAX_BODY_BYTES) return; // already answered
+      received += chunk.length;
+      if (received > MAX_BODY_BYTES) {
+        tooLarge();
+        resolve(null);
+        return;
+      }
+      chunks.push(chunk);
+    });
     req.on("end", () => resolve(Buffer.concat(chunks)));
     req.on("error", reject);
   });
@@ -256,7 +296,8 @@ async function handleRequest(req, res) {
     return;
   }
 
-  const body = await readBody(req);
+  const body = await readBody(req, res);
+  if (body === null) return;
   // Match on the path only. Ports that keep the query string here would 404
   // a request the others route.
   const path = req.url.split("?")[0];
@@ -358,8 +399,17 @@ async function handleRequest(req, res) {
     // ACK and flush before doing any work: Seel retries anything not
     // answered with a 200 within 10 seconds.
     respond(res, 200, { ok: true });
+    let event;
     try {
-      handleWebhookEvent(JSON.parse(body.toString()));
+      event = JSON.parse(body.toString());
+    } catch {
+      // The parser quotes the offending text in its message, and the
+      // payload must not reach the log.
+      console.log("[webhook] body is not JSON");
+      return;
+    }
+    try {
+      handleWebhookEvent(event);
     } catch (exc) {
       // already ACKed; never let this escape
       console.log(`[webhook] processing error: ${exc}`);
@@ -382,7 +432,10 @@ if (require.main === module) {
       }
     });
   });
-  server.listen(PORT, () => {
-    console.log(`listening on http://localhost:${PORT}`);
+  server.listen(PORT, HOST, () => {
+    const { address, port } = server.address();
+    console.log(`listening on http://${address}:${port}`);
   });
 }
+
+module.exports = { client, handleRequest };

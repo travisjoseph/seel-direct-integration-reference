@@ -711,6 +711,109 @@
         "shipping_address",
         "line_items"
       ]
+    },
+    {
+      "name": "order: a scalar line item is not skipped",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          "junk"
+        ]
+      },
+      "expect_contains": [
+        "line_items[0] must be an object"
+      ]
+    },
+    {
+      "name": "order: a scalar seel_services entry is not skipped",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1",
+          "email": "shopper@example.com"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ],
+        "seel_services": [
+          "q-123"
+        ]
+      },
+      "expect_contains": [
+        "seel_services[0] must be an object"
+      ]
+    },
+    {
+      "name": "merchant: a scalar seel_services entry is not skipped",
+      "operation": "merchant",
+      "payload": {
+        "shop_id": "shop-1",
+        "admin_domain": "shop-1.myshopify.com",
+        "shop_domain": "www.shop-1.com",
+        "shop_platform": "Shopify",
+        "shop_currency": "USD",
+        "shop_name": "Shop One",
+        "contact_name": "Ops",
+        "contact_email": "ops@example.com",
+        "seel_services": [
+          "acme-wfp"
+        ]
+      },
+      "expect_contains": [
+        "seel_services[0] must be an object"
+      ]
     }
   ],
   "contract_cases": [
@@ -900,6 +1003,109 @@
       "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": \"012\"}]}",
       "expect_minted": true,
       "note": "a real id, not a falsy zero"
+    },
+    {
+      "name": "contract_id empty array",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": []
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": []}]}",
+      "expect_minted": false
+    },
+    {
+      "name": "contract_id empty object",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": {}
+          }
+        ]
+      },
+      "response_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": {}}]}",
+      "expect_minted": false
+    },
+    {
+      "name": "response body is an array, not an object",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": [],
+      "response_json": "[]",
+      "expect_minted": false,
+      "note": "a 200 whose body is not an object is not a minted contract and must not crash the check"
+    },
+    {
+      "name": "seel_services entry is a scalar",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "seel_services": [
+          "ct_1"
+        ]
+      },
+      "response_json": "{\"seel_services\": [\"ct_1\"]}",
+      "expect_minted": false
+    },
+    {
+      "name": "integer wider than 64 bits elsewhere in the response",
+      "request": {
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "response": {
+        "order_number": 12345678901234567890,
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "contract_id": null
+          }
+        ]
+      },
+      "response_json": "{\"order_number\": 12345678901234567890, \"seel_services\": [{\"type\": \"acme-wfp\", \"contract_id\": null}]}",
+      "expect_minted": false,
+      "note": "Java's parser must not give up on a big integer and skip the check"
     }
   ],
   "uncovered_requests": [
@@ -932,6 +1138,21 @@
         ]
       },
       "request_json": "{\"seel_services\": [{\"type\": \"acme-wfp\", \"quote_id\": \"q-1\", \"price\": 0.98}]}",
+      "expect_checked": true
+    },
+    {
+      "name": "a big integer does not stop the check from running",
+      "request": {
+        "order_number": 12345678901234567890,
+        "seel_services": [
+          {
+            "type": "acme-wfp",
+            "quote_id": "q-1",
+            "price": 0.98
+          }
+        ]
+      },
+      "request_json": "{\"order_number\": 12345678901234567890, \"seel_services\": [{\"type\": \"acme-wfp\", \"quote_id\": \"q-1\", \"price\": 0.98}]}",
       "expect_checked": true
     }
   ]

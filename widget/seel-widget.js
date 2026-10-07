@@ -14,9 +14,9 @@
  * to Seel. Reference proxies live in ../server/.
  *
  * onCheck/onUncheck fire only when the opt-in state changes: a toggle, a
- * default-on first render, or coverage turning ineligible. Re-quotes hand
- * the fresh price to the createQuote callback, and a shopper's opt-out
- * survives re-quotes.
+ * default-on first render, or coverage turning ineligible and back. Re-quotes
+ * hand the fresh price to the createQuote callback, and a shopper's choice,
+ * in or out, survives re-quotes.
  */
 (function () {
   "use strict";
@@ -33,8 +33,8 @@
 
   var state = {
     quote: null,
-    checked: false,
-    userChose: false, // once the shopper toggles, is_default_on no longer applies
+    checked: false,   // coverage currently applied to the order
+    optIn: null,      // the shopper's last toggle; null until they toggle, then is_default_on no longer applies
     requestSeq: 0,    // guards against out-of-order quote responses
     checkHandlers: [],
     uncheckHandlers: [],
@@ -55,9 +55,11 @@
       body: JSON.stringify(params),
       signal: controller ? controller.signal : undefined,
     }).then(function (res) {
-      if (timer) clearTimeout(timer);
       if (!res.ok) throw new Error("Quote request failed: " + res.status);
       return res.json();
+    }).then(function (body) {
+      if (timer) clearTimeout(timer);
+      return body;
     }, function (err) {
       if (timer) clearTimeout(timer);
       throw err;
@@ -68,6 +70,11 @@
    * The quoteData passed to callbacks: camelCase keys, raw API response
    * on .raw.
    */
+  function textList(v) {
+    if (Array.isArray(v)) return v;
+    return typeof v === "string" ? [v] : [];
+  }
+
   function normalizeQuote(q) {
     var extra = q.extra_info || {};
     var copy = q.widget_copy || {};
@@ -81,15 +88,15 @@
       eligibleItems: q.eligible_items || [],
       coverages: q.coverages || [],
       extraInfo: {
-        displayWidgetText: extra.display_widget_text || copy.widget_text || [],
+        displayWidgetText: textList(extra.display_widget_text || copy.widget_text),
         optOutWarningText: extra.opt_out_warning_text || "",
-        coverageDetailsText: extra.coverage_details_text || [],
+        coverageDetailsText: textList(extra.coverage_details_text),
         termsUrl: extra.terms_url || "",
         privacyPolicyUrl: extra.privacy_policy_url || "",
         isWidgetHidden: !!extra.is_widget_hidden,
         widgetTitle: extra.widget_title || copy.widget_title || "Worry-Free Delivery",
       },
-      modalDetails: copy.modal_details_text || [],
+      modalDetails: Array.isArray(copy.modal_details_text) ? copy.modal_details_text : [],
       raw: q,
     };
   }
@@ -120,7 +127,7 @@
   }
 
   function setChecked(checked, byUser) {
-    if (byUser) state.userChose = true;
+    if (byUser) state.optIn = checked;
     if (state.checked === checked) return;
     state.checked = checked;
     fire(checked ? state.checkHandlers : state.uncheckHandlers, state.quote);
@@ -226,11 +233,17 @@
         if (seq !== state.requestSeq) return state.quote; // superseded by a newer call
         var quote = normalizeQuote(resp);
         state.quote = quote;
-        var eligible = isOffer(quote);
-        var checked = eligible && (state.userChose ? state.checked : !!quoteParams.is_default_on);
+        var wantsIn = state.optIn === null ? !!quoteParams.is_default_on : state.optIn;
+        var checked = isOffer(quote) && wantsIn;
         render(quote, checked);
         setChecked(checked);
-        if (callback) callback(quote);
+        if (callback) {
+          try {
+            callback(quote);
+          } catch (e) {
+            console.error("[SeelSDK] createQuote callback error", e);
+          }
+        }
         return quote;
       })
       .catch(function (err) {

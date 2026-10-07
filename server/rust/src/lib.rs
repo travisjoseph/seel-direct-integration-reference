@@ -190,7 +190,10 @@ impl std::error::Error for SeelApiError {}
 /// failure before/while reading a response.
 #[derive(Debug)]
 pub enum SeelError {
-    /// Non-2xx response from Seel (see [`SeelApiError`]).
+    /// Non-2xx response from Seel (see [`SeelApiError`]), or a 2xx whose
+    /// body was not JSON: that carries Seel's status and
+    /// `{"seel_raw_body": "<text>"}`, so the caller sees what Seel sent
+    /// instead of a decode error.
     Api(SeelApiError),
     /// Network or protocol failure before a usable response was received.
     Transport(Box<ureq::Error>),
@@ -200,6 +203,10 @@ pub enum SeelError {
     /// Seel requires, or a shape the API accepts and then fails on. Carries
     /// every problem at once rather than one 400 at a time.
     Validation { operation: String, problems: Vec<String> },
+    /// An id argument that cannot travel as a path segment (see `id_param`).
+    /// A path boundary rather than a payload rule, so `without_validation`
+    /// does not turn it off.
+    InvalidId { operation: String, problem: String },
     /// `create_order` returned 200 but no contract was created. Every
     /// failed attach observed so far is `contract_id: null` on an otherwise
     /// successful response rather than a status code, so without this check
@@ -218,6 +225,7 @@ impl fmt::Display for SeelError {
                 "{operation}: {}. Call .without_validation() on the client to skip these checks.",
                 problems.join("; ")
             ),
+            SeelError::InvalidId { operation, problem } => write!(f, "{operation}: {problem}"),
             SeelError::ContractNotMinted { detail, .. } => {
                 write!(f, "order created but no contract was minted: {detail}")
             }
@@ -226,6 +234,44 @@ impl fmt::Display for SeelError {
 }
 
 impl std::error::Error for SeelError {}
+
+impl SeelError {
+    /// Did the request reach Seel and then time out waiting for the answer?
+    ///
+    /// Only then may Seel have processed it, which is what separates a 504
+    /// from a 502 in the proxy. A connect timeout never sent the request,
+    /// so it stays a plain transport failure.
+    pub fn is_timeout(&self) -> bool {
+        let io_timed_out = |e: &std::io::Error| e.kind() == std::io::ErrorKind::TimedOut;
+        match self {
+            SeelError::Io(err) => io_timed_out(err),
+            SeelError::Transport(err) => {
+                err.kind() == ureq::ErrorKind::Io
+                    && std::error::Error::source(err.as_ref())
+                        .and_then(|s| s.downcast_ref::<std::io::Error>())
+                        .is_some_and(io_timed_out)
+            }
+            _ => false,
+        }
+    }
+}
+
+/// Encode an id for the upstream path, refusing values that would not stay
+/// in their segment.
+///
+/// `safe_path_param` guards the proxy's URLs; this guards direct client
+/// calls. An empty id, "." or ".." is percent-encoded as itself and then
+/// normalized away by HTTP clients, so `update_order("..")` would post to
+/// `/v1/ecommerce/` and `cancel_order("..")` to `/v1/ecommerce/cancel`.
+fn id_param(operation: &str, name: &str, value: &str) -> Result<String, SeelError> {
+    if value.is_empty() || value == "." || value == ".." {
+        return Err(SeelError::InvalidId {
+            operation: operation.to_string(),
+            problem: format!("{name} must not be empty, \".\" or \"..\""),
+        });
+    }
+    Ok(path_param(value))
+}
 
 // Required-field sets, measured against sandbox on 2026-09-10 by removing
 // one field per request from a known-good payload and recording the
@@ -340,6 +386,8 @@ fn collect_missing(payload: &Value, rules: &[(&str, &[&str])]) -> Vec<String> {
 /// object belongs is the archetypal payload mistake, and without this the
 /// nested rules silently skip it: `resolve_scope` only descends into
 /// objects, so `{"customer": "nope"}` would report no problems at all.
+/// The same goes for array entries: every array named here holds objects,
+/// so `line_items: ["nope"]` reports `line_items[0] must be an object`.
 ///
 /// Each entry is (parent scope, key, kind).
 const QUOTE_SHAPES: &[(&str, &str, &str)] = &[
@@ -382,7 +430,13 @@ fn check_shapes(payload: &Value, specs: &[(&str, &str, &str)]) -> Vec<String> {
                     Some(items) if *kind == "array_nonempty" && items.is_empty() => {
                         problems.push(format!("{path} must not be empty"))
                     }
-                    Some(_) => {}
+                    Some(items) => {
+                        for (i, item) in items.iter().enumerate() {
+                            if !item.is_object() {
+                                problems.push(format!("{path}[{i}] must be an object"));
+                            }
+                        }
+                    }
                 }
             }
         }
@@ -531,15 +585,18 @@ impl SeelClient {
             });
         };
         for entry in services {
-            // Falsy means not minted, matching Python and Node: null, "",
-            // 0 and false all mean no contract.
-            let minted = entry.get("contract_id").is_some_and(|c| match c {
-                Value::Null => false,
-                Value::String(s) => !s.is_empty(),
-                Value::Number(n) => n.as_f64() != Some(0.0),
-                Value::Bool(b) => *b,
-                _ => true,
-            });
+            // A non-object entry is a failure, not something to skip. The
+            // ports have to agree here or the check silently does nothing
+            // in one of them.
+            if !entry.is_object() {
+                return Err(SeelError::ContractNotMinted {
+                    detail: format!("seel_services contains a non-object entry: {entry}"),
+                    response: Box::new(response.clone()),
+                });
+            }
+            // Minted means a non-empty string id. null, "", numbers,
+            // booleans, [] and {} all mean no contract, in every port.
+            let minted = matches!(entry.get("contract_id"), Some(Value::String(s)) if !s.is_empty());
             if minted {
                 continue;
             }
@@ -571,7 +628,22 @@ impl SeelClient {
             None => req.call(),
         };
         match result {
-            Ok(resp) => resp.into_json::<Value>().map_err(SeelError::Io),
+            Ok(resp) => {
+                // A 2xx is Seel saying it did the work, so it is never
+                // reported as a transport failure: an empty body is an
+                // empty object, and a non-JSON body travels with its status.
+                let status = resp.status();
+                let raw = resp.into_string().map_err(SeelError::Io)?;
+                if raw.trim().is_empty() {
+                    return Ok(Value::Object(Default::default()));
+                }
+                serde_json::from_str::<Value>(&raw).map_err(|_| {
+                    SeelError::Api(SeelApiError {
+                        status,
+                        body: serde_json::json!({ "seel_raw_body": raw }),
+                    })
+                })
+            }
             Err(ureq::Error::Status(status, resp)) => {
                 let raw = resp.into_string().map_err(SeelError::Io)?;
                 let body = match serde_json::from_str::<Value>(&raw) {
@@ -598,7 +670,8 @@ impl SeelClient {
     /// Sync changed protection settings, or disable the program for a
     /// retailer - include the reason when disabling.
     pub fn update_merchant(&self, merchant_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/merchants/{}", path_param(merchant_id)), Some(payload))
+        let id = id_param("update_merchant", "merchant_id", merchant_id)?;
+        self.request("POST", &format!("/ecommerce/merchants/{id}"), Some(payload))
     }
 
     // -- Quotes -------------------------------------------------------------
@@ -618,7 +691,8 @@ impl SeelClient {
     }
 
     pub fn get_quote(&self, quote_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/quotes/{}", path_param(quote_id)), None)
+        let id = id_param("get_quote", "quote_id", quote_id)?;
+        self.request("GET", &format!("/ecommerce/quotes/{id}"), None)
     }
 
     // -- Orders -------------------------------------------------------------
@@ -637,11 +711,16 @@ impl SeelClient {
     /// the caller's job.
     pub fn create_order(&self, payload: &Value) -> Result<Value, SeelError> {
         self.check("create_order", validate_order_payload(payload))?;
-        let response = self.request("POST", "/ecommerce/orders", Some(payload))?;
         let attached = payload
             .get("seel_services")
             .and_then(Value::as_array)
             .is_some_and(|s| !s.is_empty());
+        let response = match self.request("POST", "/ecommerce/orders", Some(payload)) {
+            // A non-JSON 2xx cannot show a contract, so on an attach it is a
+            // failed attach (409), not a success to pass through.
+            Err(SeelError::Api(e)) if (200..300).contains(&e.status) && self.check_contract && attached => e.body,
+            other => other?,
+        };
         if self.check_contract && attached {
             Self::check_contract_minted(payload, &response)?;
         }
@@ -655,25 +734,24 @@ impl SeelClient {
 
     /// Sync order changes: line item removed, shipping address updated.
     pub fn update_order(&self, order_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/orders/{}", path_param(order_id)), Some(payload))
+        let id = id_param("update_order", "order_id", order_id)?;
+        self.request("POST", &format!("/ecommerce/orders/{id}"), Some(payload))
     }
 
     /// Cancel a synced order; its WFP coverage cancels with it.
     /// Refunding the WFP fee and tax to the shopper is the platform's job -
     /// see Cancellation in the README.
     pub fn cancel_order(&self, order_id: &str) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/orders/{}/cancel", path_param(order_id)), None)
+        let id = id_param("cancel_order", "order_id", order_id)?;
+        self.request("POST", &format!("/ecommerce/orders/{id}/cancel"), None)
     }
 
     // -- Fulfillments -------------------------------------------------------
 
     /// Send tracking number + carrier when the order ships.
     pub fn create_fulfillment(&self, order_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request(
-            "POST",
-            &format!("/ecommerce/orders/{}/fulfillments", path_param(order_id)),
-            Some(payload),
-        )
+        let id = id_param("create_fulfillment", "order_id", order_id)?;
+        self.request("POST", &format!("/ecommerce/orders/{id}/fulfillments"), Some(payload))
     }
 
     /// Update tracking/delivery status after fulfillment.
@@ -683,15 +761,9 @@ impl SeelClient {
         fulfillment_id: &str,
         payload: &Value,
     ) -> Result<Value, SeelError> {
-        self.request(
-            "POST",
-            &format!(
-                "/ecommerce/orders/{}/fulfillments/{}",
-                path_param(order_id),
-                path_param(fulfillment_id)
-            ),
-            Some(payload),
-        )
+        let id = id_param("update_fulfillment", "order_id", order_id)?;
+        let fid = id_param("update_fulfillment", "fulfillment_id", fulfillment_id)?;
+        self.request("POST", &format!("/ecommerce/orders/{id}/fulfillments/{fid}"), Some(payload))
     }
 
     // -- Claims -------------------------------------------------------------
@@ -712,17 +784,20 @@ impl SeelClient {
     /// be changed after creation. Seel records the outcome and fires
     /// claim.accepted or claim.rejected.
     pub fn update_claim(&self, claim_id: &str, payload: &Value) -> Result<Value, SeelError> {
-        self.request("POST", &format!("/ecommerce/claims/{}", path_param(claim_id)), Some(payload))
+        let id = id_param("update_claim", "claim_id", claim_id)?;
+        self.request("POST", &format!("/ecommerce/claims/{id}"), Some(payload))
     }
 
     pub fn get_claim(&self, claim_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/claims/{}", path_param(claim_id)), None)
+        let id = id_param("get_claim", "claim_id", claim_id)?;
+        self.request("GET", &format!("/ecommerce/claims/{id}"), None)
     }
 
     // -- Lookups (ad hoc; day-to-day state comes via webhooks) ---------------
 
     pub fn get_order(&self, order_id: &str) -> Result<Value, SeelError> {
-        self.request("GET", &format!("/ecommerce/orders/{}", path_param(order_id)), None)
+        let id = id_param("get_order", "order_id", order_id)?;
+        self.request("GET", &format!("/ecommerce/orders/{id}"), None)
     }
 
     pub fn list_contracts(&self, query: &str) -> Result<Value, SeelError> {
@@ -933,6 +1008,119 @@ mod tests {
         assert_eq!(path_param("ORD1"), "ORD1");
         assert_eq!(path_param("x/cancel"), "x%2Fcancel");
         assert_eq!(path_param("a b"), "a%20b");
+    }
+
+    /// Serve exactly one HTTP exchange on a loopback port and return the
+    /// base URL. `response` is written verbatim; `None` reads the request
+    /// and then stalls until the client gives up.
+    fn serve_once(response: Option<&'static str>) -> String {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            // Read the whole request: closing with request bytes unread
+            // makes the kernel send a reset, which the client can see
+            // before the response and report as a transport error.
+            let mut req = Vec::new();
+            let mut buf = [0u8; 4096];
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
+            match response {
+                Some(r) => stream.write_all(r.as_bytes()).unwrap(),
+                None => std::thread::sleep(Duration::from_secs(5)),
+            }
+        });
+        format!("http://{addr}")
+    }
+
+    /// A dot or empty id is encoded as itself and then normalized away by
+    /// the HTTP client, so the request would reach a different endpoint.
+    /// The client refuses it before any request is made, validation on or
+    /// off. The base URL is unroutable so a leaked request fails loudly as
+    /// a transport error instead.
+    #[test]
+    fn client_refuses_ids_that_escape_their_segment() {
+        let client = SeelClient::new("k", "http://127.0.0.1:9").without_validation();
+        for id in ["", ".", ".."] {
+            for result in [
+                client.update_order(id, &json!({})),
+                client.cancel_order(id),
+                client.get_order(id),
+                client.create_fulfillment(id, &json!({})),
+                client.update_fulfillment("ORD1", id, &json!({})),
+                client.update_merchant(id, &json!({})),
+                client.update_claim(id, &json!({})),
+            ] {
+                match result {
+                    Err(SeelError::InvalidId { problem, .. }) => {
+                        assert!(problem.contains("must not be empty"), "{id:?}: {problem}");
+                    }
+                    other => panic!("{id:?}: expected InvalidId, got {other:?}"),
+                }
+            }
+        }
+    }
+
+    /// A 2xx is never a transport failure: empty is `{}`, non-JSON keeps
+    /// Seel's status and carries the raw text.
+    #[test]
+    fn two_xx_bodies_are_never_a_transport_failure() {
+        let empty = serve_once(Some("HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n"));
+        let resp = SeelClient::new("k", &empty).get_order("o").unwrap();
+        assert_eq!(resp, json!({}));
+
+        let text = serve_once(Some("HTTP/1.1 201 Created\r\nContent-Length: 2\r\n\r\nok"));
+        match SeelClient::new("k", &text).get_order("o") {
+            Err(SeelError::Api(err)) => {
+                assert_eq!(err.status, 201);
+                assert_eq!(err.body, json!({"seel_raw_body": "ok"}));
+            }
+            other => panic!("expected an Api error carrying the raw body, got {other:?}"),
+        }
+    }
+
+    /// On an attach, a non-JSON 2xx cannot show a contract, so it is a
+    /// failed attach rather than a pass-through.
+    #[test]
+    fn create_order_with_non_json_2xx_is_not_minted() {
+        let text = serve_once(Some("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+        let order = json!({"seel_services": [{"type": "acme-wfp", "quote_id": "q-1", "price": 0.98}]});
+        match SeelClient::new("k", &text).without_validation().create_order(&order) {
+            Err(SeelError::ContractNotMinted { response, .. }) => {
+                assert_eq!(*response, json!({"seel_raw_body": "ok"}));
+            }
+            other => panic!("expected ContractNotMinted, got {other:?}"),
+        }
+    }
+
+    /// The proxy answers 504 on a timeout, so the client has to recognise
+    /// the real error ureq produces, not a hand-built one.
+    #[test]
+    fn timeout_waiting_for_seel_is_a_timeout() {
+        let stalled = serve_once(None);
+        let client =
+            SeelClient::with_options("k", &stalled, API_VERSION, Duration::from_millis(200));
+        let err = client.get_order("o").unwrap_err();
+        assert!(err.is_timeout(), "{err}");
+
+        let refused = SeelClient::new("k", "http://127.0.0.1:9").get_order("o").unwrap_err();
+        assert!(!refused.is_timeout(), "{refused}");
     }
 
     /// An id that escapes its segment must be refused, not folded into the

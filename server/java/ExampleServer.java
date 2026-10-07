@@ -46,9 +46,10 @@
  *   2. in widget/demo.html, replace the mock quoteFetcher with
  *      configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
  *
- * Like SeelClient, this example works in raw JSON strings to stay
- * dependency-free. In a real backend, use your own JSON library (Jackson,
- * Gson, ...) instead of the string splicing demoed here.
+ * SeelClient works in raw JSON strings to stay dependency-free. This
+ * example parses each request body with SeelValidation's minimal reader so
+ * it can stamp fields and validate, then serializes it back. In a real
+ * backend, use your own JSON library (Jackson, Gson, ...) for both.
  */
 
 import com.sun.net.httpserver.HttpExchange;
@@ -56,13 +57,22 @@ import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
 import java.io.OutputStream;
 import java.net.InetSocketAddress;
+import java.net.http.HttpConnectTimeoutException;
+import java.net.http.HttpTimeoutException;
 import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
+import java.util.LinkedHashMap;
+import java.util.List;
+import java.util.Map;
 import java.util.concurrent.Executors;
 
 public class ExampleServer {
 
+    // Loopback by default: this demo holds a real API key and accepts every
+    // caller, so it must not be reachable from other hosts unless asked.
+    static final String HOST = env("HOST", "127.0.0.1");
     static final int PORT = Integer.parseInt(env("PORT", "8787"));
+    static final int MAX_BODY_BYTES = 1048576;
     static final String API_KEY = env("SEEL_API_KEY", "");
     static final String WEBHOOK_SECRET = env("SEEL_WEBHOOK_SECRET", "");
     static final String BASE_URL = env("SEEL_BASE_URL", SeelClient.SANDBOX_BASE_URL);
@@ -110,13 +120,12 @@ public class ExampleServer {
      * quoting or ordering against another's merchant ID.
      */
     static String resolveMerchantId(HttpExchange exchange) {
-        // Unlike the other ports there is no request-body fallback here,
-        // because this port has no parser to read one with. When
-        // SEEL_MERCHANT_ID is unset nothing is stamped and the caller's own
-        // merchant_id passes through untouched, which is the same
-        // end result and carries the same warning: on a real platform,
-        // derive the merchant from the authenticated caller instead of
-        // trusting whatever the body says.
+        // Unlike the other ports there is no request-body fallback here.
+        // When SEEL_MERCHANT_ID is unset nothing is stamped and the
+        // caller's own merchant_id passes through untouched, which is the
+        // same end result and carries the same warning: on a real
+        // platform, derive the merchant from the authenticated caller
+        // instead of trusting whatever the body says.
         return MERCHANT_ID;
     }
 
@@ -132,14 +141,13 @@ public class ExampleServer {
      * to configure it, and tell them which events you want. Do it once per
      * environment: a sandbox registration does not carry over to production.
      *
-     * <p>Internal fan-out. Parse the payload with your JSON library, map
-     * merchant_id/order_id to your own retailer code and route to your
-     * systems. Dedupe on id + type first, since delivery is at-least-once.
-     * In production, queue this work off the request thread instead of
-     * processing inline.
+     * <p>Internal fan-out. Map merchant_id/order_id to your own retailer
+     * code and route to your systems. Dedupe on id + type first, since
+     * delivery is at-least-once. In production, queue this work off the
+     * request thread instead of processing inline.
      */
-    static void handleWebhookEvent(String rawPayload) {
-        System.out.println("[webhook] received: " + rawPayload);
+    static void handleWebhookEvent(Map<?, ?> event) {
+        System.out.println("[webhook] " + event.get("type") + " id=" + event.get("id"));
     }
 
     private static void respond(HttpExchange exchange, int status, String jsonBody)
@@ -156,30 +164,31 @@ public class ExampleServer {
         }
     }
 
-    /** Minimal JSON string escaping for the few strings this demo emits. */
-    private static String jsonEscape(String s) {
-        StringBuilder sb = new StringBuilder(s.length());
-        for (int i = 0; i < s.length(); i++) {
-            char c = s.charAt(i);
-            switch (c) {
-                case '"' -> sb.append("\\\"");
-                case '\\' -> sb.append("\\\\");
-                case '\n' -> sb.append("\\n");
-                case '\r' -> sb.append("\\r");
-                case '\t' -> sb.append("\\t");
-                default -> {
-                    if (c < 0x20) {
-                        sb.append(String.format("\\u%04x", (int) c));
-                    } else {
-                        sb.append(c);
-                    }
-                }
-            }
-        }
-        return sb.toString();
+    private static String error(String message) {
+        return SeelValidation.toJson(Map.of("error", message));
     }
 
+    /**
+     * Every request gets an answer. A Throwable escaping the handler would
+     * leave the client waiting on an open connection with nothing sent,
+     * which is how a deeply nested body used to hang its caller.
+     */
     private static void handle(HttpExchange exchange) throws IOException {
+        try {
+            route(exchange);
+        } catch (Throwable t) {
+            System.out.println("[proxy] handler failed: " + t);
+            try {
+                respond(exchange, 500, error("internal error"));
+            } catch (IOException unanswerable) {
+                // headers already on the wire, or the client is gone
+            }
+        } finally {
+            exchange.close();
+        }
+    }
+
+    private static void route(HttpExchange exchange) throws IOException {
         String method = exchange.getRequestMethod();
         // getRawPath, not getPath: getPath is already percent-decoded, and
         // decoding a second time in decode() turns a literal "%" in an id
@@ -203,7 +212,10 @@ public class ExampleServer {
             return;
         }
 
-        byte[] body = exchange.getRequestBody().readAllBytes();
+        byte[] body = readBody(exchange);
+        if (body == null) {
+            return;
+        }
 
         if (!method.equalsIgnoreCase("POST")) {
             respond(exchange, 404, "{\"error\": \"not found\"}");
@@ -235,12 +247,20 @@ public class ExampleServer {
             // seel_services with the quote_id and price, which mints the
             // contract and fires contract.created.
             if (seg.length == 3) {
-                String params = spliceFields(exchange, body, merchantIdField(exchange));
+                Map<String, Object> params = jsonBody(exchange, body);
                 if (params == null) {
                     return;
                 }
-                forward(exchange, "order", () -> client.createOrder(params),
-                        SeelValidation.carriesCoverage(params));
+                String merchantId = resolveMerchantId(exchange);
+                if (!merchantId.isEmpty()) {
+                    params.put("merchant_id", merchantId);
+                }
+                if (!validate(exchange, "create_order", SeelValidation.validateOrder(params))) {
+                    return;
+                }
+                String json = SeelValidation.toJson(params);
+                forward(exchange, "order", () -> client.createOrder(json),
+                        SeelValidation.carriesCoverage(json));
                 return;
             }
             if (seg[3].isEmpty()) {
@@ -253,7 +273,7 @@ public class ExampleServer {
                 return;
             }
             if (seg.length == 4) {
-                String params = spliceFields(exchange, body, "");
+                String params = passthroughBody(exchange, body);
                 if (params == null) {
                     return;
                 }
@@ -266,7 +286,7 @@ public class ExampleServer {
                 return;
             }
             if (seg.length == 5 && seg[4].equals("fulfillments")) {
-                String params = spliceFields(exchange, body, "");
+                String params = passthroughBody(exchange, body);
                 if (params == null) {
                     return;
                 }
@@ -280,7 +300,7 @@ public class ExampleServer {
                     respond(exchange, 400, "{\"error\": \"invalid id in path\"}");
                     return;
                 }
-                String params = spliceFields(exchange, body, "");
+                String params = passthroughBody(exchange, body);
                 if (params == null) {
                     return;
                 }
@@ -401,54 +421,82 @@ public class ExampleServer {
         return decoded;
     }
 
-    /** The merchant_id JSON pair to splice in, or "" when none is set. */
-    private static String merchantIdField(HttpExchange exchange) {
-        String merchantId = resolveMerchantId(exchange);
-        return merchantId.isEmpty()
-                ? ""
-                : "\"merchant_id\":\"" + jsonEscape(merchantId) + "\"";
+    /**
+     * Read the request body, or answer 413 and return null when it is over
+     * {@link #MAX_BODY_BYTES}, or 400 when its framing cannot be read.
+     * Content-Length is checked first so an oversized declared body is
+     * refused without reading it, and the read is capped as well because a
+     * chunked body declares no length.
+     */
+    private static byte[] readBody(HttpExchange exchange) throws IOException {
+        String declared = exchange.getRequestHeaders().getFirst("Content-Length");
+        if (declared != null) {
+            try {
+                if (Long.parseLong(declared.strip()) > MAX_BODY_BYTES) {
+                    respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
+                    return null;
+                }
+            } catch (NumberFormatException e) {
+                // let the server's own framing deal with a malformed header
+            }
+        }
+        byte[] body;
+        try {
+            body = exchange.getRequestBody().readNBytes(MAX_BODY_BYTES + 1);
+        } catch (IOException e) {
+            // The JDK server throws here on a bad chunk size and on
+            // chunked trailers it does not support, both the caller's to fix.
+            respond(exchange, 400, error("malformed request body"));
+            return null;
+        }
+        if (body.length > MAX_BODY_BYTES) {
+            respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
+            return null;
+        }
+        return body;
     }
 
     /**
-     * Validate a JSON object body and splice extra pairs in after the
-     * opening "{" - a demo-only shortcut for having no JSON library.
-     * Splicing can only prepend, never overwrite, so a caller who also sent
-     * one of these keys would produce a duplicate and leave the winner to
-     * the upstream parser. Callers are refused rather than allowed to find
-     * that out. In a real backend, parse the body and set the fields with
-     * your JSON library.
-     *
-     * <p>Answers 400 and returns null when the body isn't a JSON object.
+     * Parse a JSON object body, or answer 400 and return null. Nesting and
+     * number literals past the parser's limits are refused here too, so
+     * the body the proxy forwards means the same thing to every reader.
      */
-    private static String spliceFields(HttpExchange exchange, byte[] body, String injected)
+    @SuppressWarnings("unchecked")
+    private static Map<String, Object> jsonBody(HttpExchange exchange, byte[] body)
             throws IOException {
-        String trimmed = new String(body, StandardCharsets.UTF_8).strip();
-        if (trimmed.isEmpty() || !trimmed.startsWith("{") || !trimmed.endsWith("}")) {
-            respond(exchange, 400, "{\"error\": \"request body must be JSON\"}");
+        Object parsed = SeelValidation.parseJson(new String(body, StandardCharsets.UTF_8));
+        if (parsed == null) {
+            respond(exchange, 400, error("request body must be JSON"));
             return null;
         }
-        // Splicing cannot overwrite, only prepend, so a caller-supplied
-        // copy of a field this proxy stamps would survive as a duplicate
-        // key and whichever the upstream parser prefers would win - most
-        // take the last, which is the caller's. That inverts the control,
-        // so refuse rather than hope. Only the fields actually being
-        // injected are refused: with SEEL_MERCHANT_ID unset nothing is
-        // stamped and the caller must supply merchant_id themselves. A
-        // backend with a JSON library should overwrite instead of splicing.
-        for (String field : new String[] {"merchant_id", "type"}) {
-            if (injected.contains("\"" + field + "\":") && trimmed.contains("\"" + field + "\"")) {
-                respond(exchange, 400,
-                        "{\"error\": \"do not send " + field + "; the proxy sets it from "
-                                + "your credentials\"}");
-                return null;
-            }
+        if (!(parsed instanceof Map)) {
+            respond(exchange, 400, error("request body must be a JSON object"));
+            return null;
         }
-        if (injected.isEmpty()) {
-            return trimmed;
+        return (Map<String, Object>) parsed;
+    }
+
+    /** A JSON object body re-serialized unchanged, or null after a 400. */
+    private static String passthroughBody(HttpExchange exchange, byte[] body) throws IOException {
+        Map<String, Object> params = jsonBody(exchange, body);
+        return params == null ? null : SeelValidation.toJson(params);
+    }
+
+    /**
+     * Answer 400 with every problem at once when the validators object,
+     * matching the other ports. The request never left this process, so
+     * this is the caller's bug to fix. Returns false after answering.
+     */
+    private static boolean validate(HttpExchange exchange, String operation, List<String> problems)
+            throws IOException {
+        if (problems.isEmpty()) {
+            return true;
         }
-        String rest = trimmed.substring(1).strip();
-        // "{}" body: no trailing comma after the injected pairs.
-        return rest.equals("}") ? "{" + injected + "}" : "{" + injected + "," + rest;
+        Map<String, Object> out = new LinkedHashMap<>();
+        out.put("error", operation + ": " + String.join("; ", problems));
+        out.put("problems", problems);
+        respond(exchange, 400, SeelValidation.toJson(out));
+        return false;
     }
 
     /**
@@ -466,38 +514,40 @@ public class ExampleServer {
      * rather than echoed as success. Use
      * {@link SeelValidation#carriesCoverage} to decide - an order with no
      * coverage is a normal sync and must not be flagged.
+     *
+     * <p>Each failure has to stay distinguishable. Once Seel has answered
+     * 2xx the order exists, so nothing past that point may become a 502,
+     * which would invite a retry and a duplicate order.
      */
-
     private static void forward(
             HttpExchange exchange, String label, SeelCall call, boolean checkContract)
             throws IOException {
         try {
             String body = call.call();
-            // A 200 whose body is not JSON is not a success: a CDN or
-            // gateway error page in front of Seel would otherwise be
-            // relayed to the caller as a completed order sync. The other
-            // three ports get this for free by parsing the response.
-            if (SeelValidation.parseJson(body) == null) {
+            // An empty 2xx body is an empty object; a non-JSON one (a CDN
+            // or gateway page in front of Seel) is relayed verbatim under
+            // seel_raw_body rather than echoed as if it were Seel's answer.
+            Object seelResponse = body.isBlank() ? Map.of() : SeelValidation.parseJson(body);
+            boolean verbatim = seelResponse != null && !body.isBlank();
+            if (seelResponse == null) {
                 System.out.println("[proxy] " + label + ": upstream returned a non-JSON body");
-                respond(exchange, 502,
-                        "{\"error\": \"upstream " + jsonEscape(label)
-                                + " returned a non-JSON body\"}");
-                return;
+                seelResponse = Map.of("seel_raw_body", body);
             }
             if (checkContract) {
-                String reason = SeelValidation.contractNotMintedReason(body);
+                String reason = SeelValidation.contractNotMintedReason(seelResponse);
                 if (reason != null) {
                     // Seel accepted the order and minted no contract. 502
                     // would be wrong twice over: the upstream call
                     // succeeded, and a retry would duplicate the order.
                     System.out.println("[proxy] " + label + ": " + reason);
-                    respond(exchange, 409,
-                            "{\"error\": \"order created but no contract was minted: "
-                                    + jsonEscape(reason) + "\"}");
+                    Map<String, Object> out = new LinkedHashMap<>();
+                    out.put("error", "order created but no contract was minted: " + reason);
+                    out.put("seel_response", seelResponse);
+                    respond(exchange, 409, SeelValidation.toJson(out));
                     return;
                 }
             }
-            respond(exchange, 200, body);
+            respond(exchange, 200, verbatim ? body : SeelValidation.toJson(seelResponse));
         } catch (SeelApiException e) {
             // Forward Seel's status and error body - it names the
             // offending field.
@@ -505,39 +555,50 @@ public class ExampleServer {
             if (errorBody.startsWith("{")) {
                 respond(exchange, e.getStatus(), errorBody);
             } else {
-                respond(exchange, e.getStatus(),
-                        "{\"error\": \"" + jsonEscape(e.getMessage()) + "\"}");
+                respond(exchange, e.getStatus(), error(e.getMessage()));
             }
+        } catch (HttpConnectTimeoutException e) {
+            // Nothing reached Seel, so a retry is safe.
+            System.out.println("[proxy] " + label + " failed: " + e);
+            respond(exchange, 502, error("upstream " + label + " request failed"));
+        } catch (HttpTimeoutException e) {
+            // The request went out and no answer came back in time. Seel
+            // may well have processed it, so 504 rather than 502: the
+            // caller must check before retrying an order.
+            System.out.println("[proxy] " + label + " timed out: " + e);
+            respond(exchange, 504, error("timed out waiting for Seel; the request may have "
+                    + "been processed, check before retrying"));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             System.out.println("[proxy] " + label + " interrupted");
-            respond(exchange, 502,
-                    "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
+            respond(exchange, 502, error("upstream " + label + " request failed"));
         } catch (Exception e) {
             // Log before answering: a bare 502 leaves the operator unable
             // to tell a timeout from a bug in this handler.
             System.out.println("[proxy] " + label + " failed: " + e);
-            respond(exchange, 502,
-                    "{\"error\": \"upstream " + jsonEscape(label) + " request failed\"}");
+            respond(exchange, 502, error("upstream " + label + " request failed"));
         }
     }
 
     private static void handleQuote(HttpExchange exchange, byte[] body) throws IOException {
-        StringBuilder injected = new StringBuilder(merchantIdField(exchange));
-        if (!QUOTE_TYPE.isEmpty()) {
-            if (injected.length() > 0) {
-                injected.append(",");
-            }
-            injected.append("\"type\":\"").append(jsonEscape(QUOTE_TYPE)).append("\"");
-        }
-        // The proxy stamps merchant_id and type, so storefront code should
-        // not send them; spliceFields refuses a body that carries
-        // merchant_id rather than producing a duplicate key.
-        String params = spliceFields(exchange, body, injected.toString());
+        Map<String, Object> params = jsonBody(exchange, body);
         if (params == null) {
             return;
         }
-        forward(exchange, "quote", () -> client.createQuote(params));
+        // Set on the parsed map, so a caller-supplied merchant_id or type
+        // is overwritten rather than left to win as a duplicate key.
+        String merchantId = resolveMerchantId(exchange);
+        if (!merchantId.isEmpty()) {
+            params.put("merchant_id", merchantId);
+        }
+        if (!QUOTE_TYPE.isEmpty()) {
+            params.put("type", QUOTE_TYPE);
+        }
+        if (!validate(exchange, "create_quote", SeelValidation.validateQuote(params))) {
+            return;
+        }
+        String json = SeelValidation.toJson(params);
+        forward(exchange, "quote", () -> client.createQuote(json));
     }
 
     private static void handleWebhook(HttpExchange exchange, byte[] body) throws IOException {
@@ -557,7 +618,11 @@ public class ExampleServer {
         // which flushes the response to the client.
         respond(exchange, 200, "{\"ok\": true}");
         try {
-            handleWebhookEvent(new String(body, StandardCharsets.UTF_8));
+            Object event = SeelValidation.parseJson(new String(body, StandardCharsets.UTF_8));
+            if (!(event instanceof Map)) {
+                throw new IllegalArgumentException("payload is not a JSON object");
+            }
+            handleWebhookEvent((Map<?, ?>) event);
         } catch (Exception e) { // already ACKed; never let this escape
             System.out.println("[webhook] processing error: " + e);
         }
@@ -567,11 +632,18 @@ public class ExampleServer {
         if (API_KEY.isEmpty()) {
             System.out.println("warning: SEEL_API_KEY not set - quote proxy will fail");
         }
-        HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
+        // A connection that never finishes sending its request is dropped
+        // after this many seconds. Read by the JDK server once, at startup,
+        // so it has to be set before create().
+        System.getProperties().putIfAbsent("sun.net.httpserver.maxReqTime", "30");
+        HttpServer server = HttpServer.create(new InetSocketAddress(HOST, PORT), 0);
         server.createContext("/", ExampleServer::handle);
-        // Thread pool so webhook deliveries don't queue behind each other.
-        server.setExecutor(Executors.newFixedThreadPool(8));
-        System.out.println("listening on http://localhost:" + PORT);
+        // One thread per in-flight request. With a fixed pool, a handful
+        // of clients holding their request bodies open would occupy every
+        // thread and webhooks would miss Seel's 10 second ACK window.
+        server.setExecutor(Executors.newCachedThreadPool());
+        InetSocketAddress bound = server.getAddress();
+        System.out.println("listening on http://" + bound.getHostString() + ":" + bound.getPort());
         server.start();
     }
 }

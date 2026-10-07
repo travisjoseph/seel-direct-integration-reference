@@ -47,7 +47,8 @@ SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... SEEL_MERCHANT_ID=... SEEL_QUOTE_TYPE=..
 #   configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 ```
 
-The server listens on `PORT`, default 8787. Each port reads the process
+The server listens on `127.0.0.1:8787`. Set `HOST` and `PORT` to change
+either. It rejects request bodies over 1 MiB with a `413`. Each port reads the process
 environment directly and never loads a `.env` file. `.env.example` lists
 the variables to set. Never commit credentials.
 
@@ -100,7 +101,7 @@ A platform starts by replacing two functions in the example server:
 
 | Function | Replace it with |
 |---|---|
-| `authenticate_caller` | Your own retailer authentication. Here it returns true for everyone, which is fine only for a sandbox key on your own machine. The example servers bind every network interface, not just localhost, so anyone who can reach the port can use the key. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
+| `authenticate_caller` | Your own retailer authentication. Here it returns true for everyone, which is fine only because the server holds a sandbox key and binds `127.0.0.1` by default. Set `HOST` to expose it only once this function is real, or anyone who can reach the port can use the key. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
 | `resolve_merchant_id` | A lookup from the authenticated caller to that retailer's merchant ID. Here it falls back to the request body, which a real platform must not do. |
 
 Leave `SEEL_MERCHANT_ID` unset on a platform. It stamps one merchant onto
@@ -134,9 +135,14 @@ Seel's answer from a network problem:
 | Status | Meaning |
 |---|---|
 | Seel's own status | Seel rejected the request. The proxy passes Seel's error body through unchanged, so you see the field it objected to. |
-| `400` | The proxy rejected the request before sending. Python, Node and Rust return a `problems` array listing every fault. Java returns a plain `error`. |
-| `409` | Seel accepted the order but minted no contract. The order exists upstream, so do not retry it. |
-| `502` | The proxy could not reach Seel. |
+| `400` | The proxy rejected the request before sending. Validation failures carry a `problems` array listing every fault. Other rejections, such as malformed JSON, carry a plain `error`. |
+| `409` | Seel accepted the order but minted no contract, including a 2xx whose body is not JSON. The order exists upstream, so do not retry it. |
+| `413` | The request body is over 1 MiB. |
+| `502` | The proxy got no usable response from Seel. Usually Seel was unreachable and nothing was processed. If the connection dropped partway through Seel's answer, it may have processed the request, so look an order up before retrying it. |
+| `504` | Seel did not answer within 15 seconds. It may have processed the request, so look the order up before retrying. |
+
+A complete 2xx from Seel stays a 2xx. An empty body comes back as `{}`, and
+a body that is not JSON comes back as `{"seel_raw_body": "<text>"}`.
 
 The proxy also returns `400` for an ID that would escape its path segment.
 A decoded `/` would otherwise reach a different endpoint than the route
@@ -344,8 +350,8 @@ the browser. Include the `trace_id` when you raise an issue with Seel.
 
 `SeelClient.java` takes and returns raw JSON strings, so the client
 neither validates payloads nor checks for a minted contract.
-`SeelValidation.java` has a small internal JSON parser, used only for the
-contract check.
+`SeelValidation.java` has a small JSON parser and writer that the example
+server uses to stamp, validate and check each request.
 
 - Validation lives in `SeelValidation.java`. Call `validateQuote`,
   `validateOrder` or `validateMerchant` on the `Map` your JSON library
@@ -353,8 +359,6 @@ contract check.
 - `SeelValidation.contractNotMintedReason` checks a `create_order`
   response. The example server calls it. `SeelClient` does not, so call it
   yourself.
-- The example server does not call the validators, so its `400`s carry a
-  plain `error` instead of a `problems` array.
 
 ## Tests
 
