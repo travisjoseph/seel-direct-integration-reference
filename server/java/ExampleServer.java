@@ -423,9 +423,10 @@ public class ExampleServer {
 
     /**
      * Read the request body, or answer 413 and return null when it is over
-     * {@link #MAX_BODY_BYTES}. Content-Length is checked first so an
-     * oversized declared body is refused without reading it, and the read
-     * is capped as well because a chunked body declares no length.
+     * {@link #MAX_BODY_BYTES}, or 400 when its framing cannot be read.
+     * Content-Length is checked first so an oversized declared body is
+     * refused without reading it, and the read is capped as well because a
+     * chunked body declares no length.
      */
     private static byte[] readBody(HttpExchange exchange) throws IOException {
         String declared = exchange.getRequestHeaders().getFirst("Content-Length");
@@ -439,7 +440,15 @@ public class ExampleServer {
                 // let the server's own framing deal with a malformed header
             }
         }
-        byte[] body = exchange.getRequestBody().readNBytes(MAX_BODY_BYTES + 1);
+        byte[] body;
+        try {
+            body = exchange.getRequestBody().readNBytes(MAX_BODY_BYTES + 1);
+        } catch (IOException e) {
+            // The JDK server throws here on a bad chunk size and on
+            // chunked trailers it does not support, both the caller's to fix.
+            respond(exchange, 400, error("malformed request body"));
+            return null;
+        }
         if (body.length > MAX_BODY_BYTES) {
             respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
             return null;
@@ -448,8 +457,8 @@ public class ExampleServer {
     }
 
     /**
-     * Parse a JSON object body, or answer 400 and return null. Duplicate
-     * keys and nesting past the parser's limit are refused here too, so
+     * Parse a JSON object body, or answer 400 and return null. Nesting and
+     * number literals past the parser's limits are refused here too, so
      * the body the proxy forwards means the same thing to every reader.
      */
     @SuppressWarnings("unchecked")

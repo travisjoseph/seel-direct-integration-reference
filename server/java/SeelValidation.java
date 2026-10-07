@@ -444,6 +444,8 @@ public final class SeelValidation {
          * an Error that no catch of RuntimeException sees.
          */
         static final int MAX_DEPTH = 128;
+        /** Wider than any price, quantity, timestamp or numeric id Seel exchanges. */
+        static final int MAX_NUMBER_CHARS = 64;
 
         private final String src;
         private int pos;
@@ -497,12 +499,9 @@ public final class SeelValidation {
                 String key = readString();
                 skipWhitespace();
                 expect(':');
-                // Two spellings of one key ("type" and "type") would
-                // leave the winner to whichever parser reads it last. The
-                // proxy stamps keys onto this map, so refuse the ambiguity.
-                if (out.containsKey(key)) {
-                    throw new IllegalArgumentException("duplicate key \"" + key + "\" at " + pos);
-                }
+                // Last key wins, as in the other ports' parsers. The proxy
+                // stamps merchant_id and type onto the finished map, so a
+                // repeated key cannot override them.
                 out.put(key, readValue());
                 skipWhitespace();
                 char c = src.charAt(pos++);
@@ -567,6 +566,12 @@ public final class SeelValidation {
             int start = pos;
             while (pos < src.length() && "+-.eE0123456789".indexOf(src.charAt(pos)) >= 0) {
                 pos++;
+            }
+            // BigInteger and BigDecimal construction is quadratic in digit
+            // count, so a megabyte-long literal costs over ten seconds.
+            if (pos - start > MAX_NUMBER_CHARS) {
+                throw new IllegalArgumentException("number longer than " + MAX_NUMBER_CHARS
+                        + " characters at " + start);
             }
             String text = src.substring(start, pos);
             // Integers stay integers so a quantity of 1 is not "1.0", and

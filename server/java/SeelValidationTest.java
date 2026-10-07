@@ -133,16 +133,23 @@ public class SeelValidationTest {
 
         // Parser checks only this port needs, since only this port parses.
         // Each guards a defect the example server once shipped: a duplicate
-        // key letting the caller's merchant_id win, a deep body overflowing
-        // the stack with no response, and a stamped body going upstream
-        // changed.
+        // key rejected here but accepted by every other port, so a signed
+        // webhook was ACKed then dropped; a deep body overflowing the stack
+        // with no response; a megabyte-long number literal taking seconds
+        // to construct; and a stamped body going upstream changed.
         Map<String, Boolean> parserChecks = new LinkedHashMap<>();
-        parserChecks.put("duplicate keys are refused",
-                SeelValidation.parseJson("{\"a\":1,\"a\":2}") == null);
-        parserChecks.put("an escaped spelling of a key is still a duplicate",
-                SeelValidation.parseJson("{\"a\":1,\"\\u0061\":2}") == null);
+        Object dup = SeelValidation.parseJson("{\"a\":1,\"a\":2}");
+        parserChecks.put("duplicate keys resolve last-key-wins",
+                dup instanceof Map && Long.valueOf(2).equals(((Map<?, ?>) dup).get("a")));
+        Object escapedDup = SeelValidation.parseJson("{\"a\":1,\"\\u0061\":2}");
+        parserChecks.put("an escaped spelling of a key is the same key, last wins",
+                escapedDup instanceof Map && Long.valueOf(2).equals(((Map<?, ?>) escapedDup).get("a")));
         parserChecks.put("20000-deep nesting fails cleanly",
                 SeelValidation.parseJson("[".repeat(20000) + "]".repeat(20000)) == null);
+        parserChecks.put("a 65-digit number fails cleanly",
+                SeelValidation.parseJson("{\"n\":" + "9".repeat(65) + "}") == null);
+        parserChecks.put("a 64-digit number still parses",
+                SeelValidation.parseJson("{\"n\":" + "9".repeat(64) + "}") != null);
         String sample = "{\"n\":12345678901234567890,\"p\":1.10,\"s\":\"q\\\"\\\\\\n\\u0001\","
                 + "\"l\":[true,null,{}]}";
         parserChecks.put("parse then serialize round-trips " + sample,
