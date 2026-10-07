@@ -39,7 +39,8 @@ const PRODUCTION_BASE_URL = "https://api.seel.com";
 const API_VERSION = "2.6.0"; // the pinned API version; all four language ports match
 
 /**
- * Thrown on any non-2xx response. Carries the status and Seel's JSON
+ * Thrown on any non-2xx response, and on a 2xx whose body is not JSON
+ * (body is then {seel_raw_body: text}). Carries the status and Seel's JSON
  * error body: the message names the offending field, and the trace_id
  * is what Seel support will ask for.
  */
@@ -155,8 +156,13 @@ const ORDER_SHAPES = QUOTE_SHAPES.concat([["", "seel_services", "array"]]);
 const MERCHANT_SHAPES = [["", "seel_services", "array_nonempty"]];
 
 function typeName(value) {
+  if (value === null) return "null";
   if (Array.isArray(value)) return "array";
   return typeof value;
+}
+
+function isPlainObject(value) {
+  return value !== null && typeof value === "object" && !Array.isArray(value);
 }
 
 function checkShapes(payload, specs) {
@@ -173,6 +179,14 @@ function checkShapes(payload, specs) {
           problems.push(`${path} must be an array, got ${typeName(value)}`);
         } else if (kind === "array_nonempty" && value.length === 0) {
           problems.push(`${path} must not be empty`);
+        } else {
+          // Every array here holds objects. resolveScope only fans out over
+          // object entries, so without this a scalar entry is never checked.
+          value.forEach((item, i) => {
+            if (!isPlainObject(item)) {
+              problems.push(`${path}[${i}] must be an object, got ${typeName(item)}`);
+            }
+          });
         }
       }
     }
@@ -203,11 +217,9 @@ function resolveScope(payload, scope) {
       const child = node[key];
       if (fanOut && Array.isArray(child)) {
         child.forEach((item, i) => {
-          if (item !== null && typeof item === "object" && !Array.isArray(item)) {
-            next.push([item, `${prefix}${key}[${i}].`]);
-          }
+          if (isPlainObject(item)) next.push([item, `${prefix}${key}[${i}].`]);
         });
-      } else if (!fanOut && child !== null && typeof child === "object" && !Array.isArray(child)) {
+      } else if (!fanOut && isPlainObject(child)) {
         next.push([child, `${prefix}${key}.`]);
       }
     }
@@ -317,7 +329,16 @@ class SeelClient {
       }
       throw new SeelAPIError(resp.status, body);
     }
-    return resp.json();
+    const raw = await resp.text();
+    // Some calls (cancel among them) answer 2xx with no body.
+    if (raw.trim() === "") return {};
+    try {
+      return JSON.parse(raw);
+    } catch {
+      // Seel accepted the call, so the status stays a 2xx; the caller sees
+      // the raw text instead of a parse error dressed up as a 502.
+      throw new SeelAPIError(resp.status, { seel_raw_body: raw });
+    }
   }
 
   // -- Merchants ----------------------------------------------------------
@@ -394,7 +415,9 @@ class SeelClient {
    * stack will notice.
    */
   static _checkContractMinted(payload, response) {
-    const services = response.seel_services;
+    // The body can be any JSON value; null or an array has no seel_services.
+    const services =
+      response !== null && typeof response === "object" ? response.seel_services : undefined;
     // A non-array is a failure, not something to skip: the ports must agree
     // on this or the check silently does nothing in one of them.
     if (!Array.isArray(services) || !services.length) {
@@ -407,12 +430,18 @@ class SeelClient {
       );
     }
     for (const entry of services) {
-      if (entry && typeof entry === "object" && !Array.isArray(entry) && entry.contract_id) continue;
+      if (!isPlainObject(entry)) {
+        throw new SeelContractNotMintedError(
+          response, `seel_services contains a non-object entry: ${JSON.stringify(entry)}`
+        );
+      }
+      // Only a non-empty string names a contract. [] and {} are truthy and
+      // would pass a bare truthiness check.
+      if (typeof entry.contract_id === "string" && entry.contract_id) continue;
       throw new SeelContractNotMintedError(
         response,
-        `service ${JSON.stringify(entry && entry.type)} returned contract_id=null ` +
-          `(status=${JSON.stringify(entry && entry.status)}, ` +
-          `error=${JSON.stringify(entry && entry.error)})`
+        `service ${JSON.stringify(entry.type)} returned contract_id=null ` +
+          `(status=${JSON.stringify(entry.status)}, error=${JSON.stringify(entry.error)})`
       );
     }
   }
