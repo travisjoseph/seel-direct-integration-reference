@@ -1019,8 +1019,28 @@ mod tests {
         let addr = listener.local_addr().unwrap();
         std::thread::spawn(move || {
             let (mut stream, _) = listener.accept().unwrap();
+            // Read the whole request: closing with request bytes unread
+            // makes the kernel send a reset, which the client can see
+            // before the response and report as a transport error.
+            let mut req = Vec::new();
             let mut buf = [0u8; 4096];
-            let _ = stream.read(&mut buf);
+            loop {
+                let n = stream.read(&mut buf).unwrap_or(0);
+                req.extend_from_slice(&buf[..n]);
+                let text = String::from_utf8_lossy(&req);
+                if let Some(end) = text.find("\r\n\r\n") {
+                    let len = text[..end]
+                        .lines()
+                        .find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap_or(0)))
+                        .unwrap_or(0);
+                    if req.len() >= end + 4 + len {
+                        break;
+                    }
+                }
+                if n == 0 {
+                    break;
+                }
+            }
             match response {
                 Some(r) => stream.write_all(r.as_bytes()).unwrap(),
                 None => std::thread::sleep(Duration::from_secs(5)),

@@ -161,12 +161,16 @@ fn read_capped(declared_length: Option<usize>, reader: &mut dyn Read) -> Result<
 }
 
 fn read_body(request: &mut Request) -> Result<Vec<u8>, BodyReject> {
-    let result = read_capped(request.body_length(), request.as_reader());
-    if result.is_err() {
-        // tiny_http drains an unread body when the request drops, into one
-        // buffer the size of the remaining Content-Length. Refusing a 200
-        // MB body would still allocate 200 MB there, so drain it here in
-        // small steps instead.
+    let declared = request.body_length();
+    let result = read_capped(declared, request.as_reader());
+    // tiny_http 0.12 drains the rest of an unread Content-Length body when
+    // the request drops, allocating a buffer the size of the remainder on
+    // every read (EqualReader::drop). Measured: RSS of twice the body,
+    // never returned. Reading it here in 8 KB steps keeps memory flat, at
+    // the cost of answering the 413 only once the body has arrived. A
+    // chunked body is not drained by tiny_http, so it is left alone: the
+    // 413 goes out at once and the connection closes on the next parse.
+    if result.is_err() && declared.is_some() {
         let _ = std::io::copy(request.as_reader(), &mut std::io::sink());
     }
     result
