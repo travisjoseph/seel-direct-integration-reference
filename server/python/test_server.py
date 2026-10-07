@@ -192,6 +192,15 @@ class ServerBehavior(unittest.TestCase):
         )
         self.assertEqual(status, 400)
 
+    def test_lenient_int_chunk_sizes_are_400(self):
+        payload = b"{}"
+        for size in (b"0x2", b"+2", b"0_2"):
+            status, _ = self.post(
+                "/webhooks/seel", size + b"\r\n" + payload + b"\r\n0\r\n\r\n",
+                [("Transfer-Encoding", "chunked"), ("X-Seel-Hmac-SHA256", sign(payload))],
+            )
+            self.assertEqual(status, 400, size)
+
     # -- upstream outcome mapping ----------------------------------------
 
     def test_empty_2xx_body_is_an_empty_object(self):

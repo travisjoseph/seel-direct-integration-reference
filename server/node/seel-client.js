@@ -450,7 +450,7 @@ class SeelClient {
       if (typeof entry.contract_id === "string" && entry.contract_id) continue;
       throw new SeelContractNotMintedError(
         response,
-        `service ${JSON.stringify(entry.type)} returned contract_id=null ` +
+        `service ${JSON.stringify(entry.type)} returned contract_id=${JSON.stringify(entry.contract_id ?? null)} ` +
           `(status=${JSON.stringify(entry.status)}, error=${JSON.stringify(entry.error)})`
       );
     }

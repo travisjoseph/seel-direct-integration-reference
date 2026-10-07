@@ -138,10 +138,10 @@ Seel's answer from a network problem:
 | `400` | The proxy rejected the request before sending. Validation failures carry a `problems` array listing every fault. Other rejections, such as malformed JSON, carry a plain `error`. |
 | `409` | Seel accepted the order but minted no contract, including a 2xx whose body is not JSON. The order exists upstream, so do not retry it. |
 | `413` | The request body is over 1 MiB. |
-| `502` | The proxy could not reach Seel. Nothing was sent, so a retry is safe. |
+| `502` | The proxy got no usable response from Seel. Usually Seel was unreachable and nothing was processed. If the connection dropped partway through Seel's answer, it may have processed the request, so look an order up before retrying it. |
 | `504` | Seel did not answer within 15 seconds. It may have processed the request, so look the order up before retrying. |
 
-A 2xx from Seel always stays a 2xx. An empty body comes back as `{}`, and
+A complete 2xx from Seel stays a 2xx. An empty body comes back as `{}`, and
 a body that is not JSON comes back as `{"seel_raw_body": "<text>"}`.
 
 The proxy also returns `400` for an ID that would escape its path segment.

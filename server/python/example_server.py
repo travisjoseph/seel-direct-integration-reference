@@ -242,9 +242,12 @@ class Handler(BaseHTTPRequestHandler):
         """
         body = bytearray()
         while True:
-            size = int(self.rfile.readline(65537).split(b";", 1)[0].strip(), 16)
-            if size < 0:
-                raise ValueError("negative chunk size")
+            # int(x, 16) alone also takes "0x2", "+2" and "0_2", which other
+            # HTTP parsers reject; plain hex digits only.
+            digits = self.rfile.readline(65537).split(b";", 1)[0].strip()
+            if not digits or digits.strip(b"0123456789abcdefABCDEF"):
+                raise ValueError("bad chunk size")
+            size = int(digits, 16)
             if size == 0:
                 break
             if len(body) + size > MAX_BODY_BYTES:
