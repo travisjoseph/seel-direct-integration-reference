@@ -131,7 +131,31 @@ public class SeelValidationTest {
             }
         }
 
-        int total = cases.size() + contractCases.size() + uncovered.size();
+        // Parser checks only this port needs, since only this port parses.
+        // Each guards a defect the example server once shipped: a duplicate
+        // key letting the caller's merchant_id win, a deep body overflowing
+        // the stack with no response, and a stamped body going upstream
+        // changed.
+        Map<String, Boolean> parserChecks = new LinkedHashMap<>();
+        parserChecks.put("duplicate keys are refused",
+                SeelValidation.parseJson("{\"a\":1,\"a\":2}") == null);
+        parserChecks.put("an escaped spelling of a key is still a duplicate",
+                SeelValidation.parseJson("{\"a\":1,\"\\u0061\":2}") == null);
+        parserChecks.put("20000-deep nesting fails cleanly",
+                SeelValidation.parseJson("[".repeat(20000) + "]".repeat(20000)) == null);
+        String sample = "{\"n\":12345678901234567890,\"p\":1.10,\"s\":\"q\\\"\\\\\\n\\u0001\","
+                + "\"l\":[true,null,{}]}";
+        parserChecks.put("parse then serialize round-trips " + sample,
+                sample.equals(SeelValidation.toJson(SeelValidation.parseJson(sample))));
+        for (Map.Entry<String, Boolean> check : parserChecks.entrySet()) {
+            if (check.getValue()) {
+                passed++;
+            } else {
+                failures.add("parser: " + check.getKey());
+            }
+        }
+
+        int total = cases.size() + contractCases.size() + uncovered.size() + parserChecks.size();
         for (String failure : failures) {
             System.out.println("FAIL  " + failure);
         }

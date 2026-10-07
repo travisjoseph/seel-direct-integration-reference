@@ -19,6 +19,8 @@
  * resulting Map here, or build the Map first and serialize it after.
  */
 
+import java.math.BigDecimal;
+import java.math.BigInteger;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
@@ -136,6 +138,7 @@ public final class SeelValidation {
     /** Return the problems with a Create Quote payload. Empty means clean. */
     public static List<String> validateQuote(Map<String, Object> payload) {
         List<String> problems = asProblems(collectMissing(payload, QUOTE_REQUIRED));
+        problems.addAll(nonObjectEntries(payload, QUOTE_REQUIRED));
         problems.addAll(checkShapes(payload, QUOTE_SHAPES));
         return problems;
     }
@@ -155,6 +158,7 @@ public final class SeelValidation {
             combined.putAll(ORDER_SERVICE_REQUIRED);
         }
         List<String> problems = asProblems(collectMissing(payload, combined));
+        problems.addAll(nonObjectEntries(payload, combined));
         problems.addAll(checkShapes(payload, QUOTE_SHAPES));
         problems.addAll(checkShapes(payload, ORDER_EXTRA_SHAPES));
 
@@ -216,7 +220,11 @@ public final class SeelValidation {
      * and must not be reported as a failure.
      */
     public static String contractNotMintedReason(String responseJson) {
-        Object doc = parseJson(responseJson);
+        return contractNotMintedReason(parseJson(responseJson));
+    }
+
+    /** As above, for a response already parsed with {@link #parseJson}. */
+    public static String contractNotMintedReason(Object doc) {
         if (!(doc instanceof Map)) {
             return "response was not a JSON object";
         }
@@ -242,15 +250,12 @@ public final class SeelValidation {
     }
 
     /**
-     * Falsy means not minted, matching the other ports: null, "", 0 and
-     * false all mean no contract. A string "012" is a real id.
+     * Minted means contract_id is a non-empty string, matching the other
+     * ports. null, "", numbers, booleans, [] and {} all mean no contract.
+     * A string "012" is a real id.
      */
     private static boolean isMinted(Object contractId) {
-        if (contractId == null) return false;
-        if (contractId instanceof String) return !((String) contractId).isEmpty();
-        if (contractId instanceof Boolean) return (Boolean) contractId;
-        if (contractId instanceof Number) return ((Number) contractId).doubleValue() != 0.0;
-        return true;
+        return contractId instanceof String && !((String) contractId).isEmpty();
     }
 
     private static String describe(Object value) {
@@ -262,7 +267,34 @@ public final class SeelValidation {
     /** Return the problems with a Create Merchant payload. Empty means clean. */
     public static List<String> validateMerchant(Map<String, Object> payload) {
         List<String> problems = asProblems(collectMissing(payload, MERCHANT_REQUIRED));
+        problems.addAll(nonObjectEntries(payload, MERCHANT_REQUIRED));
         problems.addAll(checkShapes(payload, MERCHANT_SHAPES));
+        return problems;
+    }
+
+    /**
+     * Report every array entry a fan-out rule would skip. resolveScope only
+     * descends into Maps, so without this a scalar in line_items[] passes
+     * as a clean payload with nothing to check. Reported once per entry
+     * here rather than once per rule that fans out over it.
+     */
+    private static List<String> nonObjectEntries(
+            Map<String, Object> payload, Map<String, List<String>> rules) {
+        List<String> problems = new ArrayList<>();
+        for (String scope : rules.keySet()) {
+            if (!scope.endsWith("[]") || scope.contains(".")) {
+                continue;
+            }
+            String key = scope.substring(0, scope.length() - 2);
+            if (payload.get(key) instanceof List) {
+                List<?> items = (List<?>) payload.get(key);
+                for (int i = 0; i < items.size(); i++) {
+                    if (!(items.get(i) instanceof Map)) {
+                        problems.add(key + "[" + i + "] must be an object");
+                    }
+                }
+            }
+        }
         return problems;
     }
 
@@ -340,9 +372,82 @@ public final class SeelValidation {
         return nodes;
     }
 
+    /**
+     * Serialize what {@link #parseJson} produces (Map, List, String,
+     * Boolean, Number, null) back to JSON. The proxy parses a request body
+     * to stamp fields onto it, and this is how the body goes back out.
+     */
+    static String toJson(Object value) {
+        StringBuilder sb = new StringBuilder();
+        writeJson(sb, value);
+        return sb.toString();
+    }
+
+    private static void writeJson(StringBuilder sb, Object value) {
+        if (value == null) {
+            sb.append("null");
+        } else if (value instanceof String) {
+            writeString(sb, (String) value);
+        } else if (value instanceof Boolean || value instanceof Number) {
+            sb.append(value);
+        } else if (value instanceof Map) {
+            sb.append('{');
+            String sep = "";
+            for (Map.Entry<?, ?> entry : ((Map<?, ?>) value).entrySet()) {
+                sb.append(sep);
+                writeString(sb, String.valueOf(entry.getKey()));
+                sb.append(':');
+                writeJson(sb, entry.getValue());
+                sep = ",";
+            }
+            sb.append('}');
+        } else if (value instanceof List) {
+            sb.append('[');
+            String sep = "";
+            for (Object item : (List<?>) value) {
+                sb.append(sep);
+                writeJson(sb, item);
+                sep = ",";
+            }
+            sb.append(']');
+        } else {
+            throw new IllegalArgumentException("cannot serialize " + value.getClass().getName());
+        }
+    }
+
+    private static void writeString(StringBuilder sb, String s) {
+        sb.append('"');
+        for (int i = 0; i < s.length(); i++) {
+            char c = s.charAt(i);
+            switch (c) {
+                case '"' -> sb.append("\\\"");
+                case '\\' -> sb.append("\\\\");
+                case '\n' -> sb.append("\\n");
+                case '\r' -> sb.append("\\r");
+                case '\t' -> sb.append("\\t");
+                default -> {
+                    if (c < 0x20) {
+                        sb.append(String.format("\\u%04x", (int) c));
+                    } else {
+                        sb.append(c);
+                    }
+                }
+            }
+        }
+        sb.append('"');
+    }
+
     static final class Json {
+        /**
+         * Deeper than anything Seel sends or accepts. Each level costs two
+         * stack frames, so an unbounded body would overflow the stack with
+         * an Error that no catch of RuntimeException sees.
+         */
+        static final int MAX_DEPTH = 128;
+
         private final String src;
         private int pos;
+        private int depth;
 
         Json(String src) {
             this.src = src;
@@ -371,12 +476,20 @@ public final class SeelValidation {
             };
         }
 
+        private void enter() {
+            if (++depth > MAX_DEPTH) {
+                throw new IllegalArgumentException("nesting deeper than " + MAX_DEPTH);
+            }
+        }
+
         private Map<String, Object> readObject() {
+            enter();
             Map<String, Object> out = new LinkedHashMap<>();
             pos++; // {
             skipWhitespace();
             if (src.charAt(pos) == '}') {
                 pos++;
+                depth--;
                 return out;
             }
             while (true) {
@@ -384,27 +497,41 @@ public final class SeelValidation {
                 String key = readString();
                 skipWhitespace();
                 expect(':');
+                // Two spellings of one key ("type" and "type") would
+                // leave the winner to whichever parser reads it last. The
+                // proxy stamps keys onto this map, so refuse the ambiguity.
+                if (out.containsKey(key)) {
+                    throw new IllegalArgumentException("duplicate key \"" + key + "\" at " + pos);
+                }
                 out.put(key, readValue());
                 skipWhitespace();
                 char c = src.charAt(pos++);
-                if (c == '}') return out;
+                if (c == '}') {
+                    depth--;
+                    return out;
+                }
                 if (c != ',') throw new IllegalArgumentException("expected , or } at " + pos);
             }
         }
 
         private List<Object> readArray() {
+            enter();
             List<Object> out = new ArrayList<>();
             pos++; // [
             skipWhitespace();
             if (src.charAt(pos) == ']') {
                 pos++;
+                depth--;
                 return out;
             }
             while (true) {
                 out.add(readValue());
                 skipWhitespace();
                 char c = src.charAt(pos++);
-                if (c == ']') return out;
+                if (c == ']') {
+                    depth--;
+                    return out;
+                }
                 if (c != ',') throw new IllegalArgumentException("expected , or ] at " + pos);
             }
         }
@@ -442,10 +569,18 @@ public final class SeelValidation {
                 pos++;
             }
             String text = src.substring(start, pos);
-            // Integers stay integers so a quantity of 1 is not "1.0".
-            return text.contains(".") || text.contains("e") || text.contains("E")
-                    ? (Object) Double.valueOf(text)
-                    : (Object) Long.valueOf(text);
+            // Integers stay integers so a quantity of 1 is not "1.0", and
+            // decimals keep their written form so a price of 1.10 goes
+            // upstream as 1.10. Neither may fail on a valid JSON number: an
+            // order_number wider than 64 bits is still a parseable body.
+            if (text.contains(".") || text.contains("e") || text.contains("E")) {
+                return new BigDecimal(text);
+            }
+            try {
+                return Long.valueOf(text);
+            } catch (NumberFormatException e) {
+                return new BigInteger(text);
+            }
         }
 
         private Object readLiteral(String literal, Object value) {
