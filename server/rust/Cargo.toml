@@ -8,8 +8,15 @@ publish = false
 [dependencies]
 # Blocking HTTP client for the outbound Seel API calls.
 ureq = { version = "2.12", features = ["json"] }
-# Minimal blocking HTTP server for the example backend.
-tiny_http = "0.12"
+# HTTP/1.1 server for the example backend. It can close a connection after
+# refusing a body, so leftover bytes are never parsed as another request.
+hyper = { version = "1.12", features = ["server", "http1"] }
+# tokio adapters for hyper's IO and timer traits.
+hyper-util = { version = "0.1", features = ["tokio"] }
+# Limited caps a request body while it streams in; BodyExt collects it.
+http-body-util = "0.1"
+# Async runtime hyper runs on; the blocking ureq calls go to its blocking pool.
+tokio = { version = "1", features = ["rt-multi-thread", "net", "time"] }
 serde_json = "1.0"
 # HMAC-SHA256 webhook signature verification.
 hmac = "0.12"
