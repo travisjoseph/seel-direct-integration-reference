@@ -711,11 +711,16 @@ impl SeelClient {
     /// the caller's job.
     pub fn create_order(&self, payload: &Value) -> Result<Value, SeelError> {
         self.check("create_order", validate_order_payload(payload))?;
-        let response = self.request("POST", "/ecommerce/orders", Some(payload))?;
         let attached = payload
             .get("seel_services")
             .and_then(Value::as_array)
             .is_some_and(|s| !s.is_empty());
+        let response = match self.request("POST", "/ecommerce/orders", Some(payload)) {
+            // A non-JSON 2xx cannot show a contract, so on an attach it is a
+            // failed attach (409), not a success to pass through.
+            Err(SeelError::Api(e)) if (200..300).contains(&e.status) && self.check_contract && attached => e.body,
+            other => other?,
+        };
         if self.check_contract && attached {
             Self::check_contract_minted(payload, &response)?;
         }
@@ -1067,6 +1072,20 @@ mod tests {
                 assert_eq!(err.body, json!({"seel_raw_body": "ok"}));
             }
             other => panic!("expected an Api error carrying the raw body, got {other:?}"),
+        }
+    }
+
+    /// On an attach, a non-JSON 2xx cannot show a contract, so it is a
+    /// failed attach rather than a pass-through.
+    #[test]
+    fn create_order_with_non_json_2xx_is_not_minted() {
+        let text = serve_once(Some("HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok"));
+        let order = json!({"seel_services": [{"type": "acme-wfp", "quote_id": "q-1", "price": 0.98}]});
+        match SeelClient::new("k", &text).without_validation().create_order(&order) {
+            Err(SeelError::ContractNotMinted { response, .. }) => {
+                assert_eq!(*response, json!({"seel_raw_body": "ok"}));
+            }
+            other => panic!("expected ContractNotMinted, got {other:?}"),
         }
     }
 

@@ -392,7 +392,14 @@ class SeelClient:
         quoted cart, both still mint a contract. Keeping them consistent is
         the caller's job."""
         self._check("create_order", validate_order_payload(payload))
-        response = self._request("POST", "/ecommerce/orders", payload)
+        try:
+            response = self._request("POST", "/ecommerce/orders", payload)
+        except SeelAPIError as exc:
+            # A non-JSON 2xx cannot show a contract, so on an attach it is a
+            # failed attach (409), not a success to pass through.
+            if not (200 <= exc.status < 300 and self.check_contract and payload.get("seel_services")):
+                raise
+            response = exc.body
         if self.check_contract and payload.get("seel_services"):
             self._check_contract_minted(payload, response)
         return response

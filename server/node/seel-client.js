@@ -402,8 +402,18 @@ class SeelClient {
    */
   async createOrder(payload) {
     this._check("createOrder", validateOrderPayload(payload));
-    const response = await this._request("POST", "/ecommerce/orders", payload);
-    if (this.checkContract && Array.isArray(payload.seel_services) && payload.seel_services.length) {
+    const attached = Array.isArray(payload.seel_services) && payload.seel_services.length > 0;
+    let response;
+    try {
+      response = await this._request("POST", "/ecommerce/orders", payload);
+    } catch (exc) {
+      // A non-JSON 2xx cannot show a contract, so on an attach it is a
+      // failed attach (409), not a success to pass through.
+      const ok2xx = exc instanceof SeelAPIError && exc.status >= 200 && exc.status < 300;
+      if (!(ok2xx && this.checkContract && attached)) throw exc;
+      response = exc.body;
+    }
+    if (this.checkContract && attached) {
       SeelClient._checkContractMinted(payload, response);
     }
     return response;

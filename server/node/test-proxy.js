@@ -33,6 +33,7 @@ const upstream = http.createServer((req, res) => {
       const { merchant_id: merchantId } = JSON.parse(Buffer.concat(chunks).toString());
       if (merchantId === "NULL") return res.writeHead(200).end("null");
       if (merchantId === "LIST") return res.writeHead(200).end("[]");
+      if (merchantId === "TEXT") return res.writeHead(200, { "Content-Type": "text/plain" }).end("OK");
     }
     res.writeHead(200).end(JSON.stringify({ ok: true }));
   });
@@ -146,6 +147,14 @@ test("proxy: create order answered with null is 409, not 500", async () => {
   );
   assert.strictEqual(status, 409);
   assert.strictEqual(json.seel_response, null);
+});
+
+test("proxy: create order answered with non-JSON 2xx is 409, not a pass-through 200", async () => {
+  const { status, json } = await post(
+    "/v1/ecommerce/orders", JSON.stringify({ ...order, merchant_id: "TEXT" })
+  );
+  assert.strictEqual(status, 409);
+  assert.deepStrictEqual(json.seel_response, { seel_raw_body: "OK" });
 });
 
 const tooBig = Buffer.alloc(1048576 + 1, "a");

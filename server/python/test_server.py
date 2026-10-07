@@ -40,7 +40,7 @@ class MockSeel(BaseHTTPRequestHandler):
         pass
 
     def do_POST(self):
-        self.rfile.read(int(self.headers.get("Content-Length", "0")))
+        body = self.rfile.read(int(self.headers.get("Content-Length", "0")))
         if self.path.endswith("/O-EMPTY/cancel"):
             self._reply(200, b"")
         elif self.path.endswith("/O-TEXT/cancel"):
@@ -48,6 +48,8 @@ class MockSeel(BaseHTTPRequestHandler):
         elif self.path.endswith("/O-SLOW/cancel"):
             time.sleep(1.5)
             self._reply(200, b"{}")
+        elif self.path == "/v1/ecommerce/orders" and json.loads(body).get("merchant_id") == "TEXT":
+            self._reply(200, b"OK", "text/plain")
         elif self.path == "/v1/ecommerce/orders":
             self._reply(200, b"[]")
         else:
@@ -206,6 +208,13 @@ class ServerBehavior(unittest.TestCase):
         self.assertEqual(status, 409)
         self.assertEqual(body["seel_response"], [])
         self.assertIn("no contract was minted", body["error"])
+
+    def test_create_order_with_non_json_2xx_is_409_not_minted(self):
+        order = dict(COMPLETE_ORDER, merchant_id="TEXT",
+                     seel_services=[{"type": "acme-wfp", "quote_id": "q-1", "price": 0.98}])
+        status, body = self.post("/v1/ecommerce/orders", json.dumps(order).encode())
+        self.assertEqual(status, 409)
+        self.assertEqual(body["seel_response"], {"seel_raw_body": "OK"})
 
     def test_timeout_is_504(self):
         status, body = self.post("/v1/ecommerce/orders/O-SLOW/cancel")
