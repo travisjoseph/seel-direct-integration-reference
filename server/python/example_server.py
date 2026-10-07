@@ -55,11 +55,19 @@ from seel_client import (
     SeelAPIError,
     SeelClient,
     SeelContractNotMintedError,
+    SeelTimeoutError,
     SeelValidationError,
     verify_webhook_signature,
 )
 
+# Loopback by default: this demo authenticates nobody, so it must not be
+# reachable from the network unless someone chooses that.
+HOST = os.environ.get("HOST", "127.0.0.1")
 PORT = int(os.environ.get("PORT", "8787"))
+# Request bodies larger than this get a 413 before any parsing. A quote or
+# order is a few KB; the cap exists so a single caller cannot make the
+# process buffer arbitrary input.
+MAX_BODY_BYTES = 1048576
 API_KEY = os.environ.get("SEEL_API_KEY", "")
 WEBHOOK_SECRET = os.environ.get("SEEL_WEBHOOK_SECRET", "")
 BASE_URL = os.environ.get("SEEL_BASE_URL", SANDBOX_BASE_URL)
@@ -201,12 +209,53 @@ class Handler(BaseHTTPRequestHandler):
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.end_headers()
 
-    def _read_body(self) -> bytes:
-        try:
-            length = int(self.headers.get("Content-Length", "0"))
-        except ValueError:
-            length = 0
-        return self.rfile.read(length) if length > 0 else b""
+    def _read_body(self):
+        """Read the request body, or answer 413/400 and return None.
+
+        Content-Length is checked before reading and a chunked body is
+        capped as it streams, so neither framing can push more than
+        MAX_BODY_BYTES into memory.
+        """
+        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
+            try:
+                body = self._read_chunked()
+            except ValueError:
+                self._respond(400, {"error": "malformed chunked request body"})
+                return None
+        else:
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+            except ValueError:
+                length = 0
+            body = None if length > MAX_BODY_BYTES else self.rfile.read(max(length, 0))
+        if body is None:
+            self._respond(413, {"error": f"request body exceeds {MAX_BODY_BYTES} bytes"})
+        return body
+
+    def _read_chunked(self):
+        """Decode a Transfer-Encoding: chunked body (RFC 9112 section 7.1).
+
+        http.server does not decode it, so a signed webhook sent chunked
+        would otherwise verify against an empty body and 401. Returns None
+        once the declared chunks exceed the cap, raises ValueError on
+        malformed framing.
+        """
+        body = bytearray()
+        while True:
+            size = int(self.rfile.readline(65537).split(b";", 1)[0].strip(), 16)
+            if size < 0:
+                raise ValueError("negative chunk size")
+            if size == 0:
+                break
+            if len(body) + size > MAX_BODY_BYTES:
+                return None
+            chunk = self.rfile.read(size)
+            if len(chunk) != size or self.rfile.read(2) != b"\r\n":
+                raise ValueError("truncated chunk")
+            body += chunk
+        while self.rfile.readline(65537) not in (b"\r\n", b"\n", b""):
+            pass  # trailer fields carry nothing this server uses
+        return bytes(body)
 
     def _forward(self, label: str, call) -> None:
         """Call Seel and mirror the result back to the caller.
@@ -234,9 +283,15 @@ class Handler(BaseHTTPRequestHandler):
             # Forward Seel's status and error body - it names the
             # offending field.
             self._respond(exc.status, exc.body if isinstance(exc.body, dict) else {"error": str(exc)})
+        except SeelTimeoutError:
+            # Seel may have processed the request before we gave up, so
+            # this must not read as "safe to retry" the way a 502 does.
+            print(f"[proxy] {label}: timed out waiting for Seel", flush=True)
+            self._respond(504, {"error": "timed out waiting for Seel; the request may have "
+                                         "been processed, check before retrying"})
         except Exception as exc:
             # Log before answering: a bare 502 leaves the operator unable to
-            # tell a timeout from a bug in this handler.
+            # tell a connection failure from a bug in this handler.
             print(f"[proxy] {label} failed: {exc!r}", flush=True)
             self._respond(502, {"error": f"upstream {label} request failed"})
 
@@ -266,6 +321,8 @@ class Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):
         body = self._read_body()
+        if body is None:
+            return
         # Match on the path only. Ports that keep the query string here
         # would 404 a request the others route.
         path = self.path.split("?", 1)[0]
@@ -372,5 +429,7 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not API_KEY:
         print("warning: SEEL_API_KEY not set - quote proxy will fail")
-    print(f"listening on http://localhost:{PORT}")
-    ThreadingHTTPServer(("", PORT), Handler).serve_forever()
+    server = ThreadingHTTPServer((HOST, PORT), Handler)
+    host, port = server.server_address[:2]
+    print(f"listening on http://{host}:{port}", flush=True)
+    server.serve_forever()

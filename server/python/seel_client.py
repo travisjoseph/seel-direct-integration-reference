@@ -23,6 +23,7 @@ import base64
 import hashlib
 import hmac
 import json
+import socket
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -48,6 +49,10 @@ class SeelAPIError(Exception):
     """Raised on any non-2xx response. Carries the status and Seel's JSON
     error body: the message names the offending field, and the trace_id is
     what Seel support will ask for.
+
+    Also raised on a 2xx whose body is not JSON, with the status passed
+    through and the text under body["seel_raw_body"], so a caller can tell
+    "Seel accepted it and said something unparseable" from a failure.
     """
 
     def __init__(self, status: int, body: dict | str):
@@ -55,6 +60,15 @@ class SeelAPIError(Exception):
         self.body = body
         message = body.get("error", str(body)) if isinstance(body, dict) else str(body)
         super().__init__(f"Seel API {status}: {message}")
+
+
+class SeelTimeoutError(Exception):
+    """Raised when Seel did not answer within the timeout.
+
+    Distinct from a connection failure on purpose: the request may have
+    reached Seel and been processed, so a blind retry can duplicate an
+    order. Callers should look the order up before retrying.
+    """
 
 
 class SeelValidationError(Exception):
@@ -136,7 +150,9 @@ _MERCHANT_REQUIRED = {
 # Shape expectations, checked alongside presence. A scalar where an object
 # belongs is the archetypal payload mistake, and without this the nested
 # rules silently skip it: _resolve_scope only descends into dicts, so
-# {"customer": "nope"} would report no problems at all.
+# {"customer": "nope"} would report no problems at all. The same goes for
+# a scalar inside an array, so every array here is checked for object
+# entries too.
 #
 # Each entry is (parent scope, key, kind).
 _QUOTE_SHAPES = [
@@ -174,6 +190,9 @@ def _check_shapes(payload: dict, specs: list) -> list:
                     problems.append(f"{path} must be an array, got {_type_name(value)}")
                 elif kind == "array_nonempty" and not value:
                     problems.append(f"{path} must not be empty")
+                else:
+                    problems += [f"{path}[{i}] must be an object, got {_type_name(item)}"
+                                 for i, item in enumerate(value) if not isinstance(item, dict)]
     return problems
 
 
@@ -292,7 +311,7 @@ class SeelClient:
         )
         try:
             with urllib.request.urlopen(req, timeout=self.timeout) as resp:
-                return json.loads(resp.read().decode())
+                status, raw = resp.status, resp.read()
         except urllib.error.HTTPError as exc:
             raw = exc.read().decode(errors="replace")
             try:
@@ -300,6 +319,22 @@ class SeelClient:
             except json.JSONDecodeError:
                 body = raw
             raise SeelAPIError(exc.code, body) from exc
+        except urllib.error.URLError as exc:
+            # urlopen wraps a timeout during connect or send in URLError;
+            # one while waiting for the response arrives bare (below).
+            if isinstance(exc.reason, (socket.timeout, TimeoutError)):
+                raise SeelTimeoutError() from exc
+            raise
+        except (socket.timeout, TimeoutError) as exc:
+            raise SeelTimeoutError() from exc
+        # A 2xx is an acceptance whatever the body looks like, so none of
+        # these may surface as a transport failure.
+        if not raw.strip():
+            return {}
+        try:
+            return json.loads(raw)
+        except ValueError:
+            raise SeelAPIError(status, {"seel_raw_body": raw.decode(errors="replace")}) from None
 
     def _check(self, operation: str, problems: list) -> None:
         if self.validate and problems:
@@ -369,6 +404,10 @@ class SeelClient:
         Every failed attach observed so far is contract_id: null on a 200
         rather than a status code, so nothing else in the stack notices.
         """
+        if not isinstance(response, dict):
+            raise SeelContractNotMintedError(
+                response, f"response body is {_type_name(response)}, not an object"
+            )
         services = response.get("seel_services")
         if not isinstance(services, list) or not services:
             raise SeelContractNotMintedError(
@@ -386,11 +425,14 @@ class SeelClient:
                 raise SeelContractNotMintedError(
                     response, f"seel_services contains a non-object entry: {entry!r}"
                 )
-            if entry.get("contract_id"):
+            # Minted means a non-empty string id. Anything else ([] or {}
+            # included) is a failed attach, however truthy it looks.
+            contract_id = entry.get("contract_id")
+            if isinstance(contract_id, str) and contract_id:
                 continue
             raise SeelContractNotMintedError(
                 response,
-                f"service {entry.get('type')!r} returned contract_id=None "
+                f"service {entry.get('type')!r} returned contract_id={contract_id!r} "
                 f"(status={entry.get('status')!r}, error={entry.get('error')!r})",
             )
 
@@ -464,5 +506,7 @@ def verify_webhook_signature(body: bytes, signature_b64: str, webhook_secret: st
     """
     expected = base64.b64encode(
         hmac.new(webhook_secret.encode(), body, hashlib.sha256).digest()
-    ).decode()
-    return hmac.compare_digest(expected, signature_b64)
+    )
+    # Compare as bytes: compare_digest raises on a non-ASCII str, and a
+    # header anyone can send must only ever fail verification.
+    return hmac.compare_digest(expected, signature_b64.encode("utf-8", errors="replace"))
