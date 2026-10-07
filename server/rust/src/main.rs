@@ -47,6 +47,7 @@
 //! 2. in widget/demo.html, replace the mock quoteFetcher with
 //!    configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 
+use std::io::Read;
 use std::sync::Arc;
 use std::thread;
 
@@ -117,12 +118,58 @@ fn respond_preflight(request: Request) {
     }
 }
 
-fn read_body(request: &mut Request) -> Option<Vec<u8>> {
-    let mut body = Vec::new();
-    match request.as_reader().read_to_end(&mut body) {
-        Ok(_) => Some(body),
-        Err(_) => None,
+/// The largest request body any route accepts. A quote or order payload is
+/// a few KB; without a cap one 200 MB POST sits in this process's memory.
+const MAX_BODY_BYTES: usize = 1 << 20;
+
+/// Why a request body was not accepted, with the status it answers.
+#[derive(Debug)]
+struct BodyReject {
+    status: u16,
+    error: String,
+}
+
+impl BodyReject {
+    fn too_large() -> Self {
+        BodyReject {
+            status: 413,
+            error: format!("request body exceeds {MAX_BODY_BYTES} bytes"),
+        }
     }
+
+    fn bad_request(error: &str) -> Self {
+        BodyReject { status: 400, error: error.to_string() }
+    }
+}
+
+/// Read a body of at most `MAX_BODY_BYTES`. The declared Content-Length
+/// is refused up front so nothing is read; a chunked or lying body is cut
+/// off while reading.
+fn read_capped(declared_length: Option<usize>, reader: &mut dyn Read) -> Result<Vec<u8>, BodyReject> {
+    if declared_length.is_some_and(|n| n > MAX_BODY_BYTES) {
+        return Err(BodyReject::too_large());
+    }
+    let mut body = Vec::new();
+    reader
+        .take(MAX_BODY_BYTES as u64 + 1)
+        .read_to_end(&mut body)
+        .map_err(|_| BodyReject::bad_request("could not read request body"))?;
+    if body.len() > MAX_BODY_BYTES {
+        return Err(BodyReject::too_large());
+    }
+    Ok(body)
+}
+
+fn read_body(request: &mut Request) -> Result<Vec<u8>, BodyReject> {
+    let result = read_capped(request.body_length(), request.as_reader());
+    if result.is_err() {
+        // tiny_http drains an unread body when the request drops, into one
+        // buffer the size of the remaining Content-Length. Refusing a 200
+        // MB body would still allocate 200 MB there, so drain it here in
+        // small steps instead.
+        let _ = std::io::copy(request.as_reader(), &mut std::io::sink());
+    }
+    result
 }
 
 /// Decide whether the caller may use this proxy.
@@ -165,40 +212,39 @@ fn resolve_merchant_id(config: &Config, params: &Value) -> String {
         .to_string()
 }
 
-/// Map a Seel result back onto the caller's response.
-/// Map a Seel result back onto the caller's response.
+/// Map a Seel result onto the status and body the caller gets.
 ///
 /// Each failure has to stay distinguishable. Collapsing them into one 502
 /// would report a payload that never left this process as an upstream
 /// outage, and would invite a retry on an order Seel has already accepted.
-fn respond_result(request: Request, label: &str, result: Result<Value, SeelError>) {
+fn map_result(label: &str, result: Result<Value, SeelError>) -> (u16, Value) {
+    // The request never left this process, so this is the caller's bug.
+    // Hand back every problem at once.
+    let caller_bug = |operation: String, problems: Vec<String>| {
+        (
+            400,
+            json!({
+                "error": format!("{operation}: {}", problems.join("; ")),
+                "problems": problems,
+            }),
+        )
+    };
     match result {
-        Ok(resp) => respond_json(request, 200, &resp),
-        Err(SeelError::Validation { operation, problems }) => {
-            // The request never left this process, so this is the caller's
-            // bug. Hand back every problem at once.
-            respond_json(
-                request,
-                400,
-                &json!({
-                    "error": format!("{operation}: {}", problems.join("; ")),
-                    "problems": problems,
-                }),
-            );
-        }
+        Ok(resp) => (200, resp),
+        Err(SeelError::Validation { operation, problems }) => caller_bug(operation, problems),
+        Err(SeelError::InvalidId { operation, problem }) => caller_bug(operation, vec![problem]),
         Err(SeelError::ContractNotMinted { detail, response }) => {
             // Seel accepted the order and minted no contract. 502 would be
             // wrong twice over: the upstream call succeeded, and a retry
             // would duplicate the order.
             println!("[proxy] {label}: {detail}");
-            respond_json(
-                request,
+            (
                 409,
-                &json!({
+                json!({
                     "error": format!("order created but no contract was minted: {detail}"),
                     "seel_response": *response,
                 }),
-            );
+            )
         }
         Err(SeelError::Api(err)) => {
             // Forward Seel's status and error body - it names the
@@ -208,41 +254,57 @@ fn respond_result(request: Request, label: &str, result: Result<Value, SeelError
             } else {
                 json!({"error": err.to_string()})
             };
-            respond_json(request, err.status, &body);
+            (err.status, body)
+        }
+        Err(other) if other.is_timeout() => {
+            // Seel got the request and never answered, so it may have been
+            // processed. A 502 here would invite the retry that double
+            // creates an order.
+            eprintln!("[proxy] {label} timed out: {other}");
+            (
+                504,
+                json!({
+                    "error": "timed out waiting for Seel; the request may have been processed, check before retrying"
+                }),
+            )
         }
         Err(other) => {
             // Log before answering: a bare 502 leaves the operator unable
-            // to tell a timeout from a bug in this handler.
+            // to tell a reset from a bug in this handler.
             eprintln!("[proxy] {label} failed: {other}");
-            respond_json(
-                request,
-                502,
-                &json!({ "error": format!("upstream {label} request failed") }),
-            );
+            (502, json!({ "error": format!("upstream {label} request failed") }))
         }
     }
 }
 
-/// Read and parse a JSON object body, or return the error message to send
-/// back with a 400.
-fn read_json_object(request: &mut Request) -> Result<Value, &'static str> {
+fn respond_result(request: Request, label: &str, result: Result<Value, SeelError>) {
+    let (status, body) = map_result(label, result);
+    respond_json(request, status, &body);
+}
+
+/// Read and parse a JSON object body, or return the rejection to send back.
+fn read_json_object(request: &mut Request) -> Result<Value, BodyReject> {
     // A body that never fully arrived is not the same as a malformed one,
     // and saying so would send the caller looking at the wrong thing.
-    let raw = read_body(request).ok_or("could not read request body")?;
-    let parsed: Value =
-        serde_json::from_slice(&raw).map_err(|_| "request body must be JSON")?;
+    let raw = read_body(request)?;
+    let parsed: Value = serde_json::from_slice(&raw)
+        .map_err(|_| BodyReject::bad_request("request body must be JSON"))?;
     if parsed.is_object() {
         Ok(parsed)
     } else {
-        Err("request body must be a JSON object")
+        Err(BodyReject::bad_request("request body must be a JSON object"))
     }
+}
+
+fn respond_reject(request: Request, reject: BodyReject) {
+    respond_json(request, reject.status, &json!({ "error": reject.error }));
 }
 
 fn handle_quote(mut request: Request, config: &Config) {
     let mut params = match read_json_object(&mut request) {
         Ok(v) => v,
-        Err(message) => {
-            respond_json(request, 400, &json!({ "error": message }));
+        Err(reject) => {
+            respond_reject(request, reject);
             return;
         }
     };
@@ -265,8 +327,8 @@ fn handle_quote(mut request: Request, config: &Config) {
 fn handle_create_order(mut request: Request, config: &Config) {
     let mut params = match read_json_object(&mut request) {
         Ok(v) => v,
-        Err(message) => {
-            respond_json(request, 400, &json!({ "error": message }));
+        Err(reject) => {
+            respond_reject(request, reject);
             return;
         }
     };
@@ -283,8 +345,8 @@ fn handle_create_order(mut request: Request, config: &Config) {
 fn handle_update_order(mut request: Request, config: &Config, order_id: &str) {
     let params = match read_json_object(&mut request) {
         Ok(v) => v,
-        Err(message) => {
-            respond_json(request, 400, &json!({ "error": message }));
+        Err(reject) => {
+            respond_reject(request, reject);
             return;
         }
     };
@@ -301,8 +363,8 @@ fn handle_cancel_order(request: Request, config: &Config, order_id: &str) {
 fn handle_create_fulfillment(mut request: Request, config: &Config, order_id: &str) {
     let params = match read_json_object(&mut request) {
         Ok(v) => v,
-        Err(message) => {
-            respond_json(request, 400, &json!({ "error": message }));
+        Err(reject) => {
+            respond_reject(request, reject);
             return;
         }
     };
@@ -318,8 +380,8 @@ fn handle_update_fulfillment(
 ) {
     let params = match read_json_object(&mut request) {
         Ok(v) => v,
-        Err(message) => {
-            respond_json(request, 400, &json!({ "error": message }));
+        Err(reject) => {
+            respond_reject(request, reject);
             return;
         }
     };
@@ -330,10 +392,15 @@ fn handle_update_fulfillment(
 }
 
 fn handle_webhook(mut request: Request, config: &Config) {
-    // An unreadable body can't be verified, so treat it as unsigned.
+    // An unreadable body can't be verified, so treat it as unsigned. An
+    // oversize one is refused like any other route's.
     let raw = match read_body(&mut request) {
-        Some(b) => b,
-        None => {
+        Ok(b) => b,
+        Err(reject) if reject.status == 413 => {
+            respond_reject(request, reject);
+            return;
+        }
+        Err(_) => {
             respond_json(request, 401, &json!({"error": "invalid signature"}));
             return;
         }
@@ -402,6 +469,9 @@ fn handle_request(request: Request, config: &Config) {
 }
 
 fn main() {
+    // Loopback by default: this demo authenticates nobody, so it must not
+    // be reachable from the network unless the operator asks for that.
+    let host = env_or("HOST", "127.0.0.1");
     let port: u16 = match env_or("PORT", "8787").parse() {
         Ok(p) => p,
         Err(_) => 8787,
@@ -420,19 +490,131 @@ fn main() {
         quote_type: env_or("SEEL_QUOTE_TYPE", ""),
     });
 
-    let server = match Server::http(("0.0.0.0", port)) {
+    let server = match Server::http((host.as_str(), port)) {
         Ok(s) => s,
         Err(err) => {
-            eprintln!("failed to bind port {port}: {err}");
+            eprintln!("failed to bind {host}:{port}: {err}");
             std::process::exit(1);
         }
     };
-    println!("listening on http://localhost:{port}");
+    println!("listening on http://{host}:{port}");
 
     // Handle each request on its own thread so webhook deliveries do not
     // queue behind each other.
     for request in server.incoming_requests() {
         let config = Arc::clone(&config);
         thread::spawn(move || handle_request(request, &config));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use seel_direct_integration_reference::SeelApiError;
+    use std::io::Cursor;
+
+    #[test]
+    fn body_cap_refuses_declared_length_without_reading() {
+        let mut never_read = Cursor::new(vec![b'a'; 8]);
+        let reject = read_capped(Some(MAX_BODY_BYTES + 1), &mut never_read).err().unwrap();
+        assert_eq!(reject.status, 413);
+        assert_eq!(reject.error, "request body exceeds 1048576 bytes");
+        assert_eq!(never_read.position(), 0);
+        assert!(read_capped(Some(MAX_BODY_BYTES), &mut Cursor::new(vec![])).is_ok());
+    }
+
+    /// A chunked body declares no length, so the cap has to hold while
+    /// reading, and stop reading once it is passed.
+    #[test]
+    fn body_cap_holds_while_reading_an_undeclared_length() {
+        let mut body = Cursor::new(vec![b'a'; 2 * MAX_BODY_BYTES]);
+        let reject = read_capped(None, &mut body).err().unwrap();
+        assert_eq!(reject.status, 413);
+        assert_eq!(body.position() as usize, MAX_BODY_BYTES + 1);
+
+        let exact = vec![b'a'; MAX_BODY_BYTES];
+        assert_eq!(read_capped(None, &mut Cursor::new(exact.clone())).unwrap(), exact);
+    }
+
+    #[test]
+    fn validation_is_a_400_with_every_problem() {
+        let (status, body) = map_result(
+            "quote",
+            Err(SeelError::Validation {
+                operation: "create_quote".to_string(),
+                problems: vec!["missing required field a".to_string(), "b must be an object".to_string()],
+            }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(body["error"], "create_quote: missing required field a; b must be an object");
+        assert_eq!(body["problems"], json!(["missing required field a", "b must be an object"]));
+
+        let (status, body) = map_result(
+            "order cancel",
+            Err(SeelError::InvalidId {
+                operation: "cancel_order".to_string(),
+                problem: "order_id must not be empty".to_string(),
+            }),
+        );
+        assert_eq!(status, 400);
+        assert_eq!(body["problems"], json!(["order_id must not be empty"]));
+    }
+
+    #[test]
+    fn unminted_contract_is_a_409_carrying_seels_response() {
+        let seel = json!({"seel_services": [{"type": "x", "contract_id": null}]});
+        let (status, body) = map_result(
+            "order",
+            Err(SeelError::ContractNotMinted {
+                detail: "service x returned contract_id=null".to_string(),
+                response: Box::new(seel.clone()),
+            }),
+        );
+        assert_eq!(status, 409);
+        assert_eq!(
+            body["error"],
+            "order created but no contract was minted: service x returned contract_id=null"
+        );
+        assert_eq!(body["seel_response"], seel);
+    }
+
+    /// Seel's own status and body travel through untouched, for errors and
+    /// for a 2xx whose body was not JSON. A non-object body is wrapped so
+    /// the caller always gets a JSON object.
+    #[test]
+    fn seel_status_passes_through() {
+        let api = |status, body| Err(SeelError::Api(SeelApiError { status, body }));
+        let (status, body) = map_result("quote", api(422, json!({"error": "bad field", "trace_id": "t"})));
+        assert_eq!((status, body), (422, json!({"error": "bad field", "trace_id": "t"})));
+
+        let (status, body) = map_result("order update", api(201, json!({"seel_raw_body": "ok"})));
+        assert_eq!((status, body), (201, json!({"seel_raw_body": "ok"})));
+
+        let (status, body) = map_result("quote", api(500, json!("<html>oops</html>")));
+        assert_eq!(status, 500);
+        assert_eq!(body, json!({"error": "Seel API 500: <html>oops</html>"}));
+    }
+
+    #[test]
+    fn no_response_is_a_502_and_timeout_is_a_504() {
+        let no_response = SeelError::Transport(Box::new(ureq::Error::from(
+            std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset"),
+        )));
+        let (status, body) = map_result("quote", Err(no_response));
+        assert_eq!(status, 502);
+        assert_eq!(body, json!({"error": "upstream quote request failed"}));
+
+        let timed_out = SeelError::Transport(Box::new(ureq::Error::from(
+            std::io::Error::new(std::io::ErrorKind::TimedOut, "timed out reading response"),
+        )));
+        let (status, body) = map_result("order", Err(timed_out));
+        assert_eq!(status, 504);
+        assert_eq!(
+            body["error"],
+            "timed out waiting for Seel; the request may have been processed, check before retrying"
+        );
+
+        let body_timed_out = SeelError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "slow body"));
+        assert_eq!(map_result("order", Err(body_timed_out)).0, 504);
     }
 }
