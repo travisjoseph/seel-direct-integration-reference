@@ -15,6 +15,7 @@ import unittest
 from seel_client import (
     SeelClient,
     SeelContractNotMintedError,
+    attaches_coverage,
     validate_merchant_payload,
     validate_order_payload,
     validate_quote_payload,
@@ -74,9 +75,7 @@ class SharedContractCases(unittest.TestCase):
     def test_check_only_runs_when_coverage_was_attached(self):
         for case in UNCOVERED:
             with self.subTest(case=case["name"]):
-                services = case["request"].get("seel_services")
-                checked = bool(isinstance(services, list) and services)
-                self.assertEqual(checked, case["expect_checked"])
+                self.assertEqual(attaches_coverage(case["request"]), case["expect_checked"])
 
 
 if __name__ == "__main__":

@@ -1251,6 +1251,28 @@
       },
       "request_json": "{\"order_number\": 12345678901234567890, \"seel_services\": [{\"type\": \"acme-wfp\", \"quote_id\": \"q-1\", \"price\": 0.98}]}",
       "expect_checked": true
+    },
+    {
+      "name": "an object-shaped seel_services is checked",
+      "request": {
+        "seel_services": {
+          "type": "acme-wfp",
+          "quote_id": "q-1",
+          "price": 0.98
+        }
+      },
+      "request_json": "{\"seel_services\": {\"type\": \"acme-wfp\", \"quote_id\": \"q-1\", \"price\": 0.98}}",
+      "expect_checked": true,
+      "note": "the attach mistake: with validation off the check still has to run"
+    },
+    {
+      "name": "an empty seel_services object is a normal sync",
+      "request": {
+        "order_id": "o-1",
+        "seel_services": {}
+      },
+      "request_json": "{\"order_id\": \"o-1\", \"seel_services\": {}}",
+      "expect_checked": false
     }
   ]
 }

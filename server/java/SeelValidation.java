@@ -197,14 +197,32 @@ public final class SeelValidation {
         }
     }
 
-    /** Does this request attach coverage, and so warrant a contract check? */
+    /**
+     * Does this request attach coverage, and so warrant a contract check?
+     *
+     * <p>Any non-empty seel_services counts, not only an array. An object
+     * there is a known attach mistake, and with validation off it must still
+     * be checked rather than pass as covered.
+     */
     public static boolean carriesCoverage(String requestJson) {
         Object doc = parseJson(requestJson);
         if (!(doc instanceof Map)) {
             return false;
         }
         Object services = ((Map<?, ?>) doc).get("seel_services");
-        return services instanceof List && !((List<?>) services).isEmpty();
+        if (services instanceof List) {
+            return !((List<?>) services).isEmpty();
+        }
+        if (services instanceof Map) {
+            return !((Map<?, ?>) services).isEmpty();
+        }
+        if (services instanceof String) {
+            return !((String) services).isEmpty();
+        }
+        if (services instanceof Number) {
+            return new BigDecimal(services.toString()).signum() != 0;
+        }
+        return Boolean.TRUE.equals(services);
     }
 
     /**
