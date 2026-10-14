@@ -72,6 +72,7 @@ public class SeelBindingTest {
                 runBindingCase((Map<String, Object>) entry, payloads, client);
             }
             preflight(client);
+            bodyCap(client);
             bothConfigured(client);
         } finally {
             proxy.stop(0);
@@ -203,6 +204,17 @@ public class SeelBindingTest {
         check("preflight unknown origin",
                 unknown.headers().firstValue("Access-Control-Allow-Origin").isEmpty(),
                 "got " + unknown.headers().map());
+    }
+
+    /** The 413 for a body over the cap, through a real client. */
+    private static void bodyCap(SeelClient client) throws Exception {
+        ExampleServer.config = new ExampleServer.Config(client, "m-solo", null);
+        HttpResponse<String> response = send(
+                "POST", PATHS.get("quote"), "x".repeat(ExampleServer.MAX_BODY_BYTES + 1), null);
+        check("body over the cap is 413",
+                response.statusCode() == 413
+                        && response.body().equals("{\"error\":\"request body exceeds 1048576 bytes\"}"),
+                "got " + response.statusCode() + " " + response.body());
     }
 
     private static void bothConfigured(SeelClient client) {
