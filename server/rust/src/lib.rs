@@ -674,6 +674,11 @@ impl SeelClient {
         self.request("POST", &format!("/ecommerce/merchants/{id}"), Some(payload))
     }
 
+    pub fn get_merchant(&self, merchant_id: &str) -> Result<Value, SeelError> {
+        let id = id_param("get_merchant", "merchant_id", merchant_id)?;
+        self.request("GET", &format!("/ecommerce/merchants/{id}"), None)
+    }
+
     // -- Quotes -------------------------------------------------------------
 
     /// Quote a cart at checkout. The response carries everything the
@@ -1065,6 +1070,7 @@ mod tests {
                 client.create_fulfillment(id, &json!({})),
                 client.update_fulfillment("ORD1", id, &json!({})),
                 client.update_merchant(id, &json!({})),
+                client.get_merchant(id),
                 client.update_claim(id, &json!({})),
             ] {
                 match result {
@@ -1075,6 +1081,35 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Answers one request with its own request line, so a test can see
+    /// the method and path the client sent.
+    fn echo_request_line() -> String {
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let addr = listener.local_addr().unwrap();
+        std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut reader = BufReader::new(stream.try_clone().unwrap());
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            loop {
+                let mut header = String::new();
+                if reader.read_line(&mut header).unwrap() == 0 || header == "\r\n" {
+                    break;
+                }
+            }
+            let body = json!({"line": line.trim_end()}).to_string();
+            write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+        });
+        format!("http://{addr}")
+    }
+
+    #[test]
+    fn get_merchant_is_a_get_on_the_escaped_merchant_path() {
+        let resp = SeelClient::new("k", &echo_request_line()).get_merchant("m/1 x").unwrap();
+        assert_eq!(resp, json!({"line": "GET /v1/ecommerce/merchants/m%2F1%20x HTTP/1.1"}));
     }
 
     /// A 2xx is never a transport failure: empty is `{}`, non-JSON keeps

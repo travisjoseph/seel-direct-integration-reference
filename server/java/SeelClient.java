@@ -138,6 +138,11 @@ public class SeelClient {
         return request("POST", "/ecommerce/merchants/" + pathParam(merchantId), payloadJson);
     }
 
+    public String getMerchant(String merchantId)
+            throws SeelApiException, IOException, InterruptedException {
+        return request("GET", "/ecommerce/merchants/" + pathParam(merchantId), null);
+    }
+
     // -- Quotes --------------------------------------------------------------
 
     /**

@@ -14,7 +14,9 @@
  * contract check can reason about structure rather than pattern-match text.
  */
 
+import com.sun.net.httpserver.HttpServer;
 import java.io.IOException;
+import java.net.InetSocketAddress;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.nio.file.Path;
@@ -162,7 +164,37 @@ public class SeelValidationTest {
             }
         }
 
-        int total = cases.size() + contractCases.size() + uncovered.size() + parserChecks.size();
+        // Client requests, against a local server that echoes the method
+        // and raw path it received.
+        Map<String, Boolean> clientChecks = new LinkedHashMap<>();
+        HttpServer echo = HttpServer.create(new InetSocketAddress("127.0.0.1", 0), 0);
+        echo.createContext("/", exchange -> {
+            byte[] line = (exchange.getRequestMethod() + " " + exchange.getRequestURI().getRawPath())
+                    .getBytes(StandardCharsets.UTF_8);
+            exchange.sendResponseHeaders(200, line.length);
+            exchange.getResponseBody().write(line);
+            exchange.close();
+        });
+        echo.start();
+        try {
+            SeelClient client = new SeelClient("k", "http://127.0.0.1:" + echo.getAddress().getPort());
+            clientChecks.put("getMerchant is a GET on the escaped merchant path",
+                    "GET /v1/ecommerce/merchants/m%2F1%20x".equals(client.getMerchant("m/1 x")));
+        } catch (SeelApiException | InterruptedException e) {
+            clientChecks.put("getMerchant answered without error: " + e, false);
+        } finally {
+            echo.stop(0);
+        }
+        for (Map.Entry<String, Boolean> check : clientChecks.entrySet()) {
+            if (check.getValue()) {
+                passed++;
+            } else {
+                failures.add("client: " + check.getKey());
+            }
+        }
+
+        int total = cases.size() + contractCases.size() + uncovered.size() + parserChecks.size()
+                + clientChecks.size();
         for (String failure : failures) {
             System.out.println("FAIL  " + failure);
         }

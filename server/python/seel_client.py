@@ -358,6 +358,9 @@ class SeelClient:
         retailer - include the reason when disabling."""
         return self._request("POST", f"/ecommerce/merchants/{_path_param(merchant_id)}", payload)
 
+    def get_merchant(self, merchant_id: str) -> dict:
+        return self._request("GET", f"/ecommerce/merchants/{_path_param(merchant_id)}")
+
     # -- Quotes -------------------------------------------------------------
 
     def create_quote(self, payload: dict) -> dict:
