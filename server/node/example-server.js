@@ -30,10 +30,11 @@
  *   retailers point at the platform instead of at Seel, and the platform
  *   resolves which merchant each request belongs to. Retailers hold no Seel
  *   credentials at all. See authenticateCaller() and resolveMerchantId()
- *   below, which are where a platform starts. They are not the whole job:
- *   order_id comes off the URL and is never checked against the caller, so
- *   nothing here stops one retailer touching another's order. That mapping
- *   belongs to the platform - see the README.
+ *   below, which are where a platform starts, and SEEL_RETAILER_MERCHANTS,
+ *   which binds each retailer storefront's origin to its merchant. They are
+ *   not the whole job: order_id comes off the URL and is never checked
+ *   against the caller, so nothing here stops one retailer touching
+ *   another's order. That mapping belongs to the platform - see the README.
  *
  * Run:
  *   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... node example-server.js
@@ -71,8 +72,58 @@ const WEBHOOK_SECRET = process.env.SEEL_WEBHOOK_SECRET || "";
 const BASE_URL = process.env.SEEL_BASE_URL || SANDBOX_BASE_URL;
 // Program values from Seel onboarding. When set, the proxy stamps them into
 // every quote request, so storefront code stays identical across programs.
-const MERCHANT_ID = process.env.SEEL_MERCHANT_ID || "";
 const QUOTE_TYPE = process.env.SEEL_QUOTE_TYPE || "";
+
+function normalizeOrigin(origin) {
+  return origin.trim().toLowerCase().replace(/\/+$/, "");
+}
+
+/**
+ * Parse SEEL_RETAILER_MERCHANTS into a Map of storefront origin to
+ * merchant_id.
+ *
+ * Throws on anything malformed. A bad table must stop startup: running on
+ * with a partial or empty one would refuse every retailer, or worse, bind a
+ * storefront to the wrong merchant.
+ */
+function parseRetailerMerchants(raw) {
+  let table;
+  try {
+    table = JSON.parse(raw);
+  } catch (exc) {
+    throw new Error(`SEEL_RETAILER_MERCHANTS is not valid JSON: ${exc.message}`);
+  }
+  if (table === null || typeof table !== "object" || Array.isArray(table)) {
+    throw new Error("SEEL_RETAILER_MERCHANTS must be a JSON object of origin to merchant_id");
+  }
+  // A Map, not an object: an Origin of "constructor" must not find
+  // Object.prototype.constructor.
+  const parsed = new Map();
+  for (const [origin, merchantId] of Object.entries(table)) {
+    if (typeof merchantId !== "string" || !merchantId) {
+      throw new Error(`SEEL_RETAILER_MERCHANTS[${JSON.stringify(origin)}] must be a non-empty string`);
+    }
+    const key = normalizeOrigin(origin);
+    if (parsed.has(key) && parsed.get(key) !== merchantId) {
+      throw new Error(`SEEL_RETAILER_MERCHANTS maps ${JSON.stringify(key)} to two merchants`);
+    }
+    parsed.set(key, merchantId);
+  }
+  return parsed;
+}
+
+// Mutable so the tests can rebind it per case without reloading the module.
+const merchantConfig = {
+  merchantId: process.env.SEEL_MERCHANT_ID || "",
+  retailerMerchants: process.env.SEEL_RETAILER_MERCHANTS
+    ? parseRetailerMerchants(process.env.SEEL_RETAILER_MERCHANTS)
+    : null,
+};
+// Both set is a contradiction, not a precedence question: SEEL_MERCHANT_ID
+// would silently stamp one merchant onto every retailer in the table.
+if (merchantConfig.merchantId && merchantConfig.retailerMerchants !== null) {
+  throw new Error("set SEEL_MERCHANT_ID or SEEL_RETAILER_MERCHANTS, not both");
+}
 
 const client = new SeelClient(API_KEY, BASE_URL);
 
@@ -128,42 +179,95 @@ function safePathParam(raw) {
   return decoded;
 }
 
+/** The request cannot be bound to a merchant; the handler answers 403. */
+class MerchantBindingError extends Error {}
+
 /**
- * Decide whether the caller may use this proxy.
+ * Identify the caller as { origin }, or return null to answer 401. origin is
+ * the normalized Origin header, or null.
  *
- * This demo accepts everyone, which is only safe because it holds a sandbox
- * key and listens on localhost.
+ * Browser quote requests come from a retailer's storefront, and the browser
+ * sets Origin itself; page script cannot change it. That makes the origin
+ * the caller's identity for the quote route, and resolveMerchantId() looks
+ * it up in SEEL_RETAILER_MERCHANTS. A non-browser client can send any Origin
+ * it likes, so this binds what a shopper's browser can do, not what a
+ * script with the proxy URL can.
  *
- * A platform MUST replace this. Retailers authenticate to the platform with
- * platform credentials - they never receive a Seel API key, because one key
- * covers every retailer on the platform and would let any holder act as any
- * other. A real implementation returns the caller's identity rather than a
- * boolean, and resolveMerchantId() takes it - changing both signatures is
- * part of the work.
+ * Server-to-server routes (orders, fulfillments, cancel) have no Origin.
+ * This demo accepts them from anyone, which is only safe because it holds a
+ * sandbox key and listens on localhost. A platform authenticates its
+ * retailers' backends with its own credentials, returns the retailer
+ * identity here, and maps it to a merchant the same way the origin is
+ * mapped. Retailers never receive a Seel API key: one key covers every
+ * retailer on the platform and would let any holder act as any other.
  */
 function authenticateCaller(req) {
-  return true;
+  const origin = req.headers.origin;
+  return { origin: origin ? normalizeOrigin(origin) : null };
 }
 
 /**
- * Return the merchant ID this request belongs to.
+ * Return the merchant ID to stamp, or throw MerchantBindingError.
  *
  * Single retailer: SEEL_MERCHANT_ID is set once in the environment and
  * stamped onto everything, so storefront and pipeline code carry no
  * program-specific values.
  *
- * Platform proxy: leave SEEL_MERCHANT_ID unset and look the merchant up from
- * the authenticated caller instead. Deriving it from the caller rather than
- * trusting the request body is what stops one retailer quoting or ordering
- * against another's merchant ID.
+ * Platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to its
+ * merchant. The merchant comes from the caller, never the body, which is
+ * what stops one retailer quoting or ordering against another's merchant
+ * ID. A body merchant_id that disagrees is refused rather than overwritten,
+ * so a misconfigured storefront fails loudly. The origin is the only
+ * identity this demo knows, so with a table set a backend call without one,
+ * such as create order, is refused until the platform maps its own retailer
+ * credentials here too.
  *
- * The body fallback below is a demo default so the unconfigured server still
- * runs. It is not safe on a real platform: any caller can name any merchant.
- * Replace it before anyone but you can reach this.
+ * With neither set, the body value is forwarded so the unconfigured demo
+ * still runs. Any caller can then name any merchant.
  */
-function resolveMerchantId(params) {
-  if (MERCHANT_ID) return MERCHANT_ID;
-  return params.merchant_id || "";
+function resolveMerchantId(caller, params) {
+  const { merchantId: single, retailerMerchants } = merchantConfig;
+  if (single) return single;
+  if (retailerMerchants === null) return params.merchant_id || "";
+  const merchantId = retailerMerchants.get(caller.origin);
+  if (merchantId === undefined) {
+    throw new MerchantBindingError("request origin is not a registered storefront");
+  }
+  if (Object.hasOwn(params, "merchant_id") && params.merchant_id !== merchantId) {
+    throw new MerchantBindingError(
+      "merchant_id in the request body does not match the merchant for this storefront"
+    );
+  }
+  return merchantId;
+}
+
+/**
+ * The Access-Control-Allow-Origin value for this request, or null.
+ *
+ * With a retailer table, only a registered storefront may read responses,
+ * so the header echoes that origin and is omitted for any other.
+ */
+function allowedOrigin(req) {
+  const { retailerMerchants } = merchantConfig;
+  if (retailerMerchants === null) return "*";
+  const origin = normalizeOrigin(req.headers.origin || "");
+  return retailerMerchants.has(origin) ? origin : null;
+}
+
+/**
+ * Stamp the resolved merchant into params, or answer 403 and return false.
+ */
+function stampMerchant(res, caller, params) {
+  let merchantId;
+  try {
+    merchantId = resolveMerchantId(caller, params);
+  } catch (exc) {
+    if (!(exc instanceof MerchantBindingError)) throw exc;
+    respond(res, 403, { error: exc.message });
+    return false;
+  }
+  if (merchantId) params.merchant_id = merchantId;
+  return true;
 }
 
 /**
@@ -244,7 +348,6 @@ function respond(res, status, body) {
   const data = Buffer.from(JSON.stringify(body));
   res.writeHead(status, {
     "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*", // demo only; lock down in prod
     "Content-Length": data.length,
   });
   res.end(data);
@@ -284,11 +387,19 @@ function readBody(req, res) {
   });
 }
 
+// Set on res up front so every response, including the 413 from readBody
+// and the 500 fallback, carries the same CORS headers.
+function setCorsHeaders(req, res) {
+  const origin = allowedOrigin(req);
+  if (origin) res.setHeader("Access-Control-Allow-Origin", origin);
+  if (merchantConfig.retailerMerchants !== null) res.setHeader("Vary", "Origin");
+}
+
 async function handleRequest(req, res) {
+  setCorsHeaders(req, res);
   if (req.method === "OPTIONS") {
-    // CORS preflight for the demo page
+    // CORS preflight for storefront pages
     res.writeHead(204, {
-      "Access-Control-Allow-Origin": "*",
       "Access-Control-Allow-Headers": "Content-Type",
       "Access-Control-Allow-Methods": "POST, OPTIONS",
     });
@@ -307,16 +418,19 @@ async function handleRequest(req, res) {
     return;
   }
 
-  if (path !== WEBHOOK_PATH && !authenticateCaller(req)) {
-    respond(res, 401, { error: "unauthorized" });
-    return;
+  let caller = null;
+  if (path !== WEBHOOK_PATH) {
+    caller = authenticateCaller(req);
+    if (caller === null) {
+      respond(res, 401, { error: "unauthorized" });
+      return;
+    }
   }
 
   if (path === QUOTE_PATH) {
     const params = jsonBody(res, body);
     if (params === null) return;
-    const merchantId = resolveMerchantId(params);
-    if (merchantId) params.merchant_id = merchantId;
+    if (!stampMerchant(res, caller, params)) return;
     if (QUOTE_TYPE) params.type = QUOTE_TYPE;
     await forward(res, "quote", () => client.createQuote(params));
     return;
@@ -328,8 +442,7 @@ async function handleRequest(req, res) {
   if (ORDERS_PATH.test(path)) {
     const params = jsonBody(res, body);
     if (params === null) return;
-    const merchantId = resolveMerchantId(params);
-    if (merchantId) params.merchant_id = merchantId;
+    if (!stampMerchant(res, caller, params)) return;
     await forward(res, "order", () => client.createOrder(params));
     return;
   }
@@ -424,6 +537,12 @@ if (require.main === module) {
   if (!API_KEY) {
     console.log("warning: SEEL_API_KEY not set - quote proxy will fail");
   }
+  if (!merchantConfig.merchantId && merchantConfig.retailerMerchants === null) {
+    console.log(
+      "warning: neither SEEL_MERCHANT_ID nor SEEL_RETAILER_MERCHANTS set - " +
+        "merchant_id is taken from the request body, which only a demo may do"
+    );
+  }
   const server = http.createServer((req, res) => {
     handleRequest(req, res).catch((exc) => {
       console.error(`[server] unhandled error: ${exc}`);
@@ -438,4 +557,4 @@ if (require.main === module) {
   });
 }
 
-module.exports = { client, handleRequest };
+module.exports = { client, handleRequest, merchantConfig, parseRetailerMerchants };
