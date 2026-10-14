@@ -25,7 +25,7 @@ The order lifecycle needed more messages than one sequence diagram allows, so it
 2. The quote proxy is `Seel.ExampleServer/ProxyHandler.cs`, entry point `ProxyHandler.HandleAsync`. It asks `IRetailerResolver` (`Seel.ExampleServer/RetailerResolver.cs`) which merchant the request belongs to. The platform replaces the demo `OriginRetailerResolver` with its own implementation.
 3. The proxy and the platform backend both call Seel through `SeelClient` (`Seel.Client/SeelClient.cs`). `SeelClient` adds `X-Seel-Api-Key` and `X-Seel-Api-Version` to every request.
 4. Seel sends webhooks to `POST /webhooks/seel`. `ProxyHandler.ReceiveWebhook` checks the signature with `SeelWebhooks.VerifySignature` (`Seel.Client/SeelWebhooks.cs`), answers 200, and then calls `ProxyHandler.HandleWebhookEvent`. Today `HandleWebhookEvent` only logs. The platform replaces its body to route events into its own systems.
-5. The shopper reaches the Seel Resolution Center to file a claim. The `resolve.seel.com` host and the confirmation-email link come from the project brief, not from this repo. Confirm both with Seel.
+5. The shopper reaches the Seel Resolution Center to file a claim. This repo does not reference the `resolve.seel.com` host or the confirmation-email link. Confirm both with Seel.
 
 ## 2. Enable a retailer
 
