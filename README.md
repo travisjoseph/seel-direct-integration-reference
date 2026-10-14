@@ -1,9 +1,18 @@
 # Seel Direct Integration - Reference Implementation
 
 A reference implementation of Seel's direct ("ecommerce") integration. It is
-for SaaS platforms whose retailers offer Worry-Free Purchase through an API
+for SaaS partner platforms whose retailers offer Worry-Free Purchase through an API
 rather than an app store. Shopify retailers install Seel's Shopify app
 instead and need none of this.
+
+This repo uses three terms for the three tiers in Seel > partner platform >
+retailer:
+
+| Tier | Who | Holds | Example |
+|---|---|---|---|
+| Seel | Seel | Programs, quotes, contracts, claims | `api.seel.com` |
+| Partner platform | The SaaS company in the middle | One Seel API key for all its retailers, the quote proxy, the order pipeline | A storefront builder for one industry, such as furniture or sporting goods |
+| Retailer | Each store on the partner platform | One Seel `merchant_id`, no Seel credentials | One store and its checkout |
 
 It wraps the public `/v1/ecommerce/*` APIs and follows the flow in Seel's
 [SaaS Platform Integration Quickstart](https://developer.seel.com/docs/platform-direct-integration).
@@ -63,7 +72,7 @@ onboarding:
 |---|---|
 | API key | `SEEL_API_KEY`, server-side only |
 | Webhook secret | `SEEL_WEBHOOK_SECRET`, server-side only |
-| Merchant ID (per retailer) | `SEEL_MERCHANT_ID` for one retailer, `SEEL_RETAILER_MERCHANTS` for a platform with many |
+| Merchant ID (per retailer) | `SEEL_MERCHANT_ID` for one retailer, `SEEL_RETAILER_MERCHANTS` for a partner platform with many |
 | Quote type (per program, e.g. `acme-wfp`) | `SEEL_QUOTE_TYPE`, or per request |
 
 `SEEL_RETAILER_MERCHANTS` is a JSON object that maps each retailer
@@ -93,26 +102,26 @@ pipeline, so the order routes are optional.
 storefront widget ──▶ retailer backend ──▶ Seel
 ```
 
-**Platform proxy.** The platform holds one API key for every retailer on it.
-Retailers call the platform instead of Seel and hold no Seel credentials,
-at most their merchant ID. The platform creates each merchant, resolves
+**Partner platform proxy.** The partner platform holds one API key for every retailer on it.
+Retailers call the partner platform instead of Seel and hold no Seel credentials,
+at most their merchant ID. The partner platform creates each merchant, resolves
 which merchant each request belongs to, and receives every webhook, so it
 sees all contracts and claims across its retailers.
 
 ```
-storefront widget ──▶ platform proxy ──▶ Seel
-retailer backend  ──▶ platform proxy ──▶ Seel
+storefront widget ──▶ partner platform proxy ──▶ Seel
+retailer backend  ──▶ partner platform proxy ──▶ Seel
 ```
 
 The proxy serves Seel's own paths, prefix included. A retailer already
-written against Seel moves onto a platform by setting `SEEL_BASE_URL` to the
-platform and changing nothing else.
+written against Seel moves onto a partner platform by setting `SEEL_BASE_URL` to the
+partner platform and changing nothing else.
 
-A platform starts from two functions in the example server:
+A partner platform starts from two functions in the example server:
 
-| Function | What it does here | What a platform does |
+| Function | What it does here | What a partner platform does |
 |---|---|---|
-| `authenticate_caller` | Returns the caller's identity, or nothing for a 401. The identity is the request's `Origin` header. A shopper's browser sets that header itself, so page script on one retailer's storefront cannot claim to be another's. Server-to-server calls (orders, fulfillments, cancel) carry no `Origin` and are accepted from anyone, which is fine only because the server holds a sandbox key and binds `127.0.0.1` by default. | Keeps the origin for browser quotes, and authenticates each retailer backend with the platform's own credentials. Set `HOST` to expose the server only once that is real. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
+| `authenticate_caller` | Returns the caller's identity, or nothing for a 401. The identity is the request's `Origin` header. A shopper's browser sets that header itself, so page script on one retailer's storefront cannot claim to be another's. Server-to-server calls (orders, fulfillments, cancel) carry no `Origin` and are accepted from anyone, which is fine only because the server holds a sandbox key and binds `127.0.0.1` by default. | Keeps the origin for browser quotes, and authenticates each retailer backend with the partner platform's own credentials. Set `HOST` to expose the server only once that is real. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
 | `resolve_merchant_id` | Takes the caller and the request body. With `SEEL_RETAILER_MERCHANTS` set, it looks the caller's origin up in that table and stamps the result. An unknown or missing origin gets a 403, and so does a body `merchant_id` that names a different merchant. The body value is never forwarded. | Maps its backend credentials to a merchant the same way. Until it does, a create-order call without a registered `Origin` gets a 403 in table mode. |
 
 With the table set, CORS answers with the matched origin only, plus
@@ -120,7 +129,7 @@ With the table set, CORS answers with the matched origin only, plus
 origin. The `*` answer remains only when no table is set.
 
 The widget's `setMerchantId()` puts that ID in the quote body, so on a
-platform it must match the storefront's entry in the table. A mismatch is
+partner platform it must match the storefront's entry in the table. A mismatch is
 a misconfigured storefront and gets the 403 rather than a quote under the
 wrong merchant.
 
@@ -128,24 +137,24 @@ The origin binds what a shopper's browser can do. It does not authenticate
 a script, since anything other than a browser can send any `Origin` it
 likes.
 
-Leave `SEEL_MERCHANT_ID` unset on a platform. It stamps one merchant onto
+Leave `SEEL_MERCHANT_ID` unset on a partner platform. It stamps one merchant onto
 every request, which only fits the single-retailer case, and the server
 refuses to start with both set.
 
-The platform also has to check order ownership. The proxy takes `order_id`
+The partner platform also has to check order ownership. The proxy takes `order_id`
 from the URL and never checks it against the caller, so one retailer could
-cancel another's order by knowing its ID. The platform needs its own record
+cancel another's order by knowing its ID. The partner platform needs its own record
 of which retailer owns which order and must check it before proxying. That
-mapping belongs to the platform, so this reference does not invent one.
+mapping belongs to the partner platform, so this reference does not invent one.
 Read this code for the request shapes and the lifecycle, not as a hardened
 gateway.
 
-## Platforms with one merchant per retailer
+## Partner platforms with one merchant per retailer
 
-A platform that holds one API key creates a separate Seel merchant for each
+A partner platform that holds one API key creates a separate Seel merchant for each
 retailer. It runs the same lifecycle for every one of them.
 
-For a .NET platform, [server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) walks this lifecycle with diagrams and names the file and function behind each step.
+For a .NET partner platform, [server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) walks this lifecycle with diagrams and names the file and function behind each step.
 
 **Enable a retailer.** Call `create_merchant()` with a `seel_services`
 entry that sets `is_enabled` to true, `is_default_on` and `coverages`.
@@ -172,7 +181,7 @@ attach rate.
 retailer by `merchant_id`.
 
 **Widget.** Seel's hosted widget bundle calls Seel from the browser with an
-embedded key, so it cannot sit behind a platform proxy. A platform that
+embedded key, so it cannot sit behind a partner platform proxy. A partner platform that
 must keep its one key server-side uses `widget/seel-widget.js`. It exposes
 the hosted bundle's interface and quotes through the proxy.
 
@@ -222,7 +231,7 @@ lookups. The clients expose all of them for you to call directly.
    `create_merchant()`, then `create_orders_batch()` with at least 30 days
    of order history so Seel can run risk analysis.
 2. **Checkout.** The storefront embeds `seel-widget.js` and the mount div,
-   calls `setMerchantId()` with the retailer's merchant ID on a platform,
+   calls `setMerchantId()` with the retailer's merchant ID on a partner platform,
    and calls `createQuote(payload, callback)`. The widget quotes through
    the proxy and renders the offer. Re-quote on address change, discount
    or item removal. The widget drops out-of-order responses and remembers
@@ -235,7 +244,7 @@ lookups. The clients expose all of them for you to call directly.
 5. **Cancellation.** Call `cancel_order()`, which cancels coverage too. On
    the `contract.cancelled` webhook, refund the WFP fee and its tax to the
    shopper if you have not already.
-6. **Claims.** When a shopper files in the platform's returns flow, call
+6. **Claims.** When a shopper files in the partner platform's returns flow, call
    `create_claim()`.
    - Delivery-issue claims use `claim_type` `loss`, `damage`, `theft` or
      `delay`, with `claim_details` and attachments.
@@ -243,7 +252,7 @@ lookups. The clients expose all of them for you to call directly.
      number, the return shipment (carrier, tracking, label cost) and the
      return addresses.
 
-   Each program sets who decides the outcome. Either the platform
+   Each program sets who decides the outcome. Either the partner platform
    adjudicates and submits its decision through `update_claim()` (accept or
    reject, with a `reject_reason` code and shopper-facing details on a
    rejection), or Seel adjudicates. Either way Seel fires `claim.accepted`
@@ -442,7 +451,7 @@ server uses to stamp, validate and check each request.
 `server/dotnet/` is a solution of three projects on `net10.0`, with no
 NuGet packages beyond xUnit in the tests.
 
-[server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) is the platform handoff. It shows the end-to-end flow in five diagrams, who owns each piece, and a build checklist.
+[server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) is the partner platform handoff. It shows the end-to-end flow in five diagrams, who owns each piece, and a build checklist.
 
 - `Seel.Client` is a class library. `SeelClient` wraps an `HttpClient`, so
   register it as a typed client with `services.AddHttpClient<SeelClient>()`
@@ -535,5 +544,5 @@ the fixture leaves it passing on a rule no port applies.
 - Style the widget to Seel's
   [design guidelines](https://developer.seel.com/docs/design-guideline)
   before production.
-- The platform owns tax on the WFP fee. Add it to the order total on
+- The partner platform owns tax on the WFP fee. Add it to the order total on
   opt-in and refund it with the fee on cancellation.

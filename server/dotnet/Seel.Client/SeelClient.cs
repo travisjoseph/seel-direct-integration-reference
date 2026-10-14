@@ -11,7 +11,7 @@
 //   order shipped/delivered  -> CreateFulfillment / UpdateFulfillment
 //   order changed/cancelled  -> UpdateOrder / CancelOrder
 //   return or claim filed    -> CreateClaim (+ UpdateClaim with the decision
-//                               when the platform adjudicates)
+//                               when the partner platform adjudicates)
 //   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
 //
 // A port of server/python/seel_client.py. Payloads are JsonObject and
@@ -71,7 +71,7 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
 
     /// <summary>
     /// Onboard one retailer. Call it when they enable the program; retailers
-    /// group under your platform organization on Seel's side. Follow with
+    /// group under your partner platform organization on Seel's side. Follow with
     /// <see cref="CreateOrdersBatchAsync"/> and at least 30 days of order
     /// history so Seel can run risk analysis.
     /// </summary>
@@ -165,7 +165,7 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
 
     /// <summary>
     /// Cancel a synced order; its WFP coverage cancels with it. Refunding the
-    /// WFP fee and tax to the shopper is the platform's job. See Cancellation
+    /// WFP fee and tax to the shopper is the partner platform's job. See Cancellation
     /// in the README.
     /// </summary>
     public Task<JsonNode?> CancelOrderAsync(string orderId, CancellationToken ct = default) =>
@@ -186,7 +186,7 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
     // -- Claims -------------------------------------------------------------
 
     /// <summary>
-    /// Register a claim when the shopper files in the platform's returns flow.
+    /// Register a claim when the shopper files in the partner platform's returns flow.
     /// Delivery-issue claims carry claim_type loss | damage | theft | delay
     /// plus claim_details with attachments; return-shipping claims carry
     /// claim_type return_shipping plus the RMA number, the return shipment
@@ -197,7 +197,7 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
         SendAsync(HttpMethod.Post, "/ecommerce/claims", payload, ct);
 
     /// <summary>
-    /// Submit the adjudication decision on programs where the platform
+    /// Submit the adjudication decision on programs where the partner platform
     /// adjudicates: decision accept | reject, with a reject_reason code and
     /// shopper-facing details on rejections. Claim items and amounts cannot be
     /// changed after creation. Seel records the outcome and fires

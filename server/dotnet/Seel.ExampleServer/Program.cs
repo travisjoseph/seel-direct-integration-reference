@@ -24,14 +24,14 @@
 //   Seel directly. The order and fulfillment routes are optional here; call
 //   SeelClient from your order pipeline instead if that fits better.
 //
-//   Platform proxy: the platform holds one API key for every retailer on it,
-//   retailers point at the platform instead of at Seel, and the platform
+//   Partner platform proxy: the partner platform holds one API key for every retailer on it,
+//   retailers point at the partner platform instead of at Seel, and the partner platform
 //   resolves which merchant each request belongs to. Retailers hold no Seel
-//   credentials at all. IRetailerResolver is where a platform starts, and
+//   credentials at all. IRetailerResolver is where a partner platform starts, and
 //   SEEL_RETAILER_MERCHANTS binds each retailer storefront's origin to its
 //   merchant. They are not the whole job: order_id comes off the URL and is
 //   never checked against the caller, so nothing here stops one retailer
-//   touching another's order. That mapping belongs to the platform; see the
+//   touching another's order. That mapping belongs to the partner platform; see the
 //   README.
 //
 // Run:

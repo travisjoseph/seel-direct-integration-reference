@@ -28,7 +28,7 @@ public sealed partial class ProxyHandler(
     public const int MaxBodyBytes = 1048576;
 
     // Routes mirror Seel's real paths, prefix included, so a caller already
-    // written against Seel moves onto a platform by changing the base URL and
+    // written against Seel moves onto a partner platform by changing the base URL and
     // nothing else.
     private const string QuotePath = "/v1/ecommerce/quotes";
     private const string OrdersPath = "/v1/ecommerce/orders";

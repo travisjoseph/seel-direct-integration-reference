@@ -25,15 +25,15 @@ Two deployments use these routes differently:
   Seel directly. The order and fulfillment routes are optional here; call
   SeelClient from your order pipeline instead if that fits better.
 
-  Platform proxy - the platform holds one API key for every retailer on it,
-  retailers point at the platform instead of at Seel, and the platform
+  Partner platform proxy - the partner platform holds one API key for every retailer on it,
+  retailers point at the partner platform instead of at Seel, and the partner platform
   resolves which merchant each request belongs to. Retailers hold no Seel
   credentials at all. See authenticate_caller() and resolve_merchant_id()
-  below, which are where a platform starts, and SEEL_RETAILER_MERCHANTS,
+  below, which are where a partner platform starts, and SEEL_RETAILER_MERCHANTS,
   which binds each retailer storefront's origin to its merchant. They are
   not the whole job: order_id comes off the URL and is never checked
   against the caller, so nothing here stops one retailer touching
-  another's order. That mapping belongs to the platform - see the README.
+  another's order. That mapping belongs to the partner platform - see the README.
 
 Run:
   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... python3 example_server.py
@@ -118,7 +118,7 @@ if MERCHANT_ID and RETAILER_MERCHANTS is not None:
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
 
 # Routes mirror Seel's real paths, prefix included, so a caller already
-# written against Seel moves onto a platform by changing the base URL and
+# written against Seel moves onto a partner platform by changing the base URL and
 # nothing else. The clients build "<base>/v1/ecommerce/...", so anything
 # shorter would 404 every call.
 QUOTE_PATH = "/v1/ecommerce/quotes"
@@ -201,11 +201,11 @@ def authenticate_caller(headers) -> Optional[Caller]:
 
     Server-to-server routes (orders, fulfillments, cancel) have no Origin.
     This demo accepts them from anyone, which is only safe because it holds
-    a sandbox key and listens on localhost. A platform authenticates its
+    a sandbox key and listens on localhost. A partner platform authenticates its
     retailers' backends with its own credentials, returns the retailer
     identity here, and maps it to a merchant the same way the origin is
     mapped. Retailers never receive a Seel API key: one key covers every
-    retailer on the platform and would let any holder act as any other.
+    retailer on the partner platform and would let any holder act as any other.
     """
     origin = headers.get("Origin")
     return Caller(origin=normalize_origin(origin) if origin else None)
@@ -218,13 +218,13 @@ def resolve_merchant_id(caller: Caller, params: dict) -> str:
     stamped onto everything, so storefront and pipeline code carry no
     program-specific values.
 
-    Platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to
+    Partner platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to
     its merchant. The merchant comes from the caller, never the body, which
     is what stops one retailer quoting or ordering against another's
     merchant ID. A body merchant_id that disagrees is refused rather than
     overwritten, so a misconfigured storefront fails loudly. The origin is
     the only identity this demo knows, so with a table set a backend call
-    without one, such as create order, is refused until the platform maps
+    without one, such as create order, is refused until the partner platform maps
     its own retailer credentials here too.
 
     With neither set, the body value is forwarded so the unconfigured demo
