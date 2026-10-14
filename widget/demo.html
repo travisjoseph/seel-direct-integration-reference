@@ -69,8 +69,13 @@
       }
     };
 
-    // Program values from Seel onboarding. If the proxy sets
-    // SEEL_MERCHANT_ID / SEEL_QUOTE_TYPE, it injects them server-side and
+    // Program values from Seel onboarding. A platform that creates one Seel
+    // merchant per retailer calls setMerchantId with that retailer's ID; the
+    // widget stamps it on every quote unless the payload names one. The
+    // proxy is the authority: a platform proxy resolves the merchant from
+    // the authenticated caller rather than trusting this value (see
+    // resolve_merchant_id in the README). A single-retailer proxy with
+    // SEEL_MERCHANT_ID / SEEL_QUOTE_TYPE set injects them server-side, and
     // storefront code can drop them entirely.
     const SEEL_PROGRAM = {
       merchantId: "YOUR_SEEL_MERCHANT_ID",
@@ -80,22 +85,24 @@
     const logEl = document.getElementById("log");
     function log(msg) { logEl.textContent += msg + "\n"; }
 
-    const { configure, createQuote, onCheck, onUncheck } = window.SeelSDK;
+    const { configure, setMerchantId, createQuote, checkboxChange, onWidgetEvent } = window.SeelSDK;
 
     configure({ quoteFetcher: async () => MOCK_QUOTE });
+    setMerchantId(SEEL_PROGRAM.merchantId);
 
-    onCheck((q) => {
-      log("onCheck  -> add line item, price " + q.displayPrice);
-      document.getElementById("seel-line").style.display = "flex";
-      document.getElementById("seel-price").textContent = q.displayPrice;
-      document.getElementById("total").textContent = "$" + (120 + parseFloat(q.price)).toFixed(2);
+    function applyCoverage(quote, checked) {
+      document.getElementById("seel-line").style.display = checked ? "flex" : "none";
+      document.getElementById("seel-price").textContent = checked ? quote.displayPrice : "";
+      const fee = checked ? parseFloat(quote.price) : 0;
+      document.getElementById("total").textContent = "$" + (120 + fee).toFixed(2);
+    }
+
+    checkboxChange((quote, checked) => {
+      log("checkboxChange -> " + (checked ? "add line item, price " + quote.displayPrice : "remove line item"));
+      applyCoverage(quote, checked);
     });
 
-    onUncheck((q) => {
-      log("onUncheck -> remove line item");
-      document.getElementById("seel-line").style.display = "none";
-      document.getElementById("total").textContent = "$120.00";
-    });
+    onWidgetEvent((e) => log("onWidgetEvent -> " + e.type));
 
     // The Quote API requires more fields than you might expect, including
     // allocated_discounts, sales_tax, image_urls, category_1, category_2
@@ -108,7 +115,6 @@
     // Full reference: https://developer.seel.com/reference/createquote
     createQuote({
       cart_id: "cart_demo_001",
-      merchant_id: SEEL_PROGRAM.merchantId,
       session_id: "session_demo_001",
       device_category: "desktop",
       device_platform: "Web",
@@ -147,7 +153,10 @@
       }],
       shipping_address: { address_1: "123 Main St", city: "San Francisco", state: "CA", zipcode: "94105", country: "US" },
       customer: { customer_id: "cus_demo", first_name: "Demo", last_name: "Shopper", email: "demo@example.com" }
-    }, (q) => log("createQuote -> status=" + q.status + " quoteId=" + q.quoteId));
+    }, (quote, checked, error) => {
+      if (error) return log("createQuote error -> " + error.code + ": " + error.message);
+      log("createQuote -> status=" + quote.status + " quoteId=" + quote.quoteId + " checked=" + checked);
+    });
   </script>
 </body>
 </html>

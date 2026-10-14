@@ -16,7 +16,7 @@ fields say `wfp` even where the product is sold as Worry-Free Delivery.
 
 | Path | What it is |
 |---|---|
-| `widget/seel-widget.js` | Storefront widget. Vanilla JS, no build step. Exposes `window.SeelSDK` (`createQuote`, `onCheck`, `onUncheck`, `configure`) and renders the Quote API response into `#seel-wfp-widget-root`. |
+| `widget/seel-widget.js` | Storefront widget. Vanilla JS, no build step. Exposes `window.SeelSDK` with the hosted bundle's interface (`createQuote`, `checkboxChange`, `updateCheckboxStatus`, `onWidgetEvent`, `destroy`, `reset`, `SEEL_WIDGET_EVENT_TYPES`) plus `setMerchantId` and `configure`, quotes through the proxy, and renders into `#seel-wfp-widget-root`. |
 | `widget/demo.html` | Offline demo with a mocked quote. Open it in a browser. |
 | `server/python/` | Stdlib only. `python3 example_server.py`. The primary copy. |
 | `server/node/` | Node 18+ built-ins. `node example-server.js` |
@@ -194,10 +194,12 @@ lookups. The clients expose all of them for you to call directly.
 1. **Onboard.** When a retailer enables the program, call
    `create_merchant()`, then `create_orders_batch()` with at least 30 days
    of order history so Seel can run risk analysis.
-2. **Checkout.** The storefront embeds `seel-widget.js` and the mount div.
-   The widget quotes through the proxy and renders the offer. Re-quote on
-   address change, discount or item removal. The widget drops out-of-order
-   responses and remembers a shopper's opt-out across re-quotes.
+2. **Checkout.** The storefront embeds `seel-widget.js` and the mount div,
+   calls `setMerchantId()` with the retailer's merchant ID on a platform,
+   and calls `createQuote(payload, callback)`. The widget quotes through
+   the proxy and renders the offer. Re-quote on address change, discount
+   or item removal. The widget drops out-of-order responses and remembers
+   a shopper's opt-out across re-quotes.
 3. **Order placed.** Call `create_order()` for every order, opted in or
    not. On opt-in, include `seel_services` with the `quote_id` and quoted
    `price`. That call mints the contract and fires `contract.created`.
@@ -223,9 +225,18 @@ lookups. The clients expose all of them for you to call directly.
    signature, answer 200 within 10 seconds, and dedupe on the payload's
    `id` plus `type`, because delivery is at-least-once.
 
-`onCheck` and `onUncheck` fire only when the opt-in state changes. A
+The `createQuote` callback gets `(quote, checkboxStatus)` on success and
+`(null, null, { code, message })` on failure, with code `INVALID_PAYLOAD`
+or `QUOTE_FAILED`. The returned Promise resolves to the quote, or `null`,
+and never rejects. `checkboxChange((quote, checked) => ...)` fires only
+when the opt-in state changes, whether from a toggle, a default-on first
+render, `updateCheckboxStatus()`, or coverage turning ineligible. A
 re-quote passes the new price to the `createQuote` callback, so update the
 displayed fee there if the price moved while the shopper stayed opted in.
+`onWidgetEvent(e => ...)` receives `{ widget, type, code, meta }`, the
+shape of the hosted bundle's card click events. `meta` carries `checked`
+and `quoteStatus`. The hosted bundle strips view events down to analytics
+fields. This build keeps `type` on them.
 
 ## Environments
 
@@ -413,7 +424,11 @@ against a local mock of Seel. Rust tests routing, path decoding and the
 client's handling of 2xx bodies. Each port also checks that `get_merchant`
 sends a `GET` to the escaped merchant path.
 
+`widget/test-widget.js` covers the widget's `SeelSDK` contract against a
+stub DOM, using Node built-ins only.
+
 ```bash
+node --test widget/test-widget.js
 python3 -m unittest discover server/python
 node --test server/node/test-validation.js server/node/test-proxy.js
 (cd server/rust && cargo test)
@@ -430,9 +445,16 @@ the fixture leaves it passing on a rule no port applies.
 
 ## Notes
 
-- The widget matches the `window.SeelSDK` interface of Seel's hosted
-  bundle, so switching to that bundle later means changing the script
-  `src`. Only `configure()` is specific to this build.
+- The widget matches the hosted marketplace bundle's `window.SeelSDK`
+  names and callback signatures: `createQuote`, `checkboxChange`,
+  `updateCheckboxStatus`, `onWidgetEvent`, `destroy`, `reset` and
+  `SEEL_WIDGET_EVENT_TYPES`, with camelCase quote fields. The hosted bundle
+  calls Seel directly with an API key embedded in the script. This build
+  quotes through your proxy instead, which also makes `setMerchantId()`
+  and `configure()` its own. If Seel ships a proxy-capable hosted bundle,
+  code written against this interface moves to it with a script `src`
+  change. It emits three
+  of the bundle's event types, listed in `SEEL_WIDGET_EVENT_TYPES`.
 - Style the widget to Seel's
   [design guidelines](https://developer.seel.com/docs/design-guideline)
   before production.
