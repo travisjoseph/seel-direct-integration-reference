@@ -14,7 +14,6 @@ import hmac
 import http.client
 import json
 import pathlib
-import select
 import socket
 import threading
 import time
@@ -86,9 +85,9 @@ def raw_post(port, path, body=b"", headers=(), timeout=5):
     """POST exact bytes and return (status, parsed body).
 
     Returns (None, None) when the server closed the connection without
-    answering. The body goes out in slices and sending stops as soon as a
-    reply is readable, because a server that rejects an oversized body
-    answers before the body has finished arriving.
+    answering. The whole body goes out before anything is read, the way a
+    client library sends it, so a server that closes on an oversized body
+    before draining it fails here with a reset instead of a 413.
     """
     header_lines = "".join(f"{k}: {v}\r\n" for k, v in headers)
     if not any(k.lower() in ("content-length", "transfer-encoding") for k, _ in headers):
@@ -96,14 +95,7 @@ def raw_post(port, path, body=b"", headers=(), timeout=5):
     head = f"POST {path} HTTP/1.1\r\nHost: localhost\r\n{header_lines}\r\n".encode("latin-1")
     sock = socket.create_connection(("127.0.0.1", port), timeout=timeout)
     try:
-        sock.sendall(head)
-        for i in range(0, len(body), 65536):
-            if select.select([sock], [], [], 0)[0]:
-                break
-            try:
-                sock.sendall(body[i : i + 65536])
-            except OSError:
-                break
+        sock.sendall(head + body)
         response = http.client.HTTPResponse(sock)
         try:
             response.begin()
