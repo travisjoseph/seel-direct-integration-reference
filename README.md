@@ -233,6 +233,10 @@ when the opt-in state changes, whether from a toggle, a default-on first
 render, `updateCheckboxStatus()`, or coverage turning ineligible. A
 re-quote passes the new price to the `createQuote` callback, so update the
 displayed fee there if the price moved while the shopper stayed opted in.
+`onWidgetEvent(e => ...)` receives `{ widget, type, code, meta }`, the
+shape of the hosted bundle's card click events. `meta` carries `checked`
+and `quoteStatus`. The hosted bundle strips view events down to analytics
+fields. This build keeps `type` on them.
 
 ## Environments
 

@@ -65,6 +65,7 @@ function loadWidget() {
 
 const QUOTE = {
   quote_id: "q_1",
+  type: "acme-wfp",
   status: "accepted",
   price: "2.99",
   currency: "USD",
@@ -254,14 +255,15 @@ test("onWidgetEvent receives emitted types from SEEL_WIDGET_EVENT_TYPES", async 
   box.checked = false;
   box.fire("change");
   assert.deepEqual(
-    events.map((e) => [e.type, e.checked, e.quote.quoteId]),
+    events.map((e) => [e.widget, e.type, e.meta.checked, e.meta.quoteStatus]),
     [
-      [types.CARD_CHECKBOX_CHANGE, true, "q_1"],
-      [types.CARD_EXPOSURE_VIEW, true, "q_1"],
-      [types.CARD_INFO_CLICK, true, "q_1"],
-      [types.CARD_CHECKBOX_CHANGE, false, "q_1"],
+      ["card", types.CARD_CHECKBOX_CHANGE, true, "accepted"],
+      ["card", types.CARD_EXPOSURE_VIEW, true, "accepted"],
+      ["card", types.CARD_INFO_CLICK, true, "accepted"],
+      ["card", types.CARD_CHECKBOX_CHANGE, false, "accepted"],
     ],
   );
+  assert.equal(events[0].code, "acme-wfp", "code is the quote type, as in the bundle");
   assert.equal(types.CARD_CHECKBOX_CHANGE, "card_checkbox_change", "bundle event value");
 });
 

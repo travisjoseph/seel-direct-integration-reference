@@ -159,8 +159,17 @@
     }
   }
 
+  // Same shape as the hosted bundle's card click events. The bundle strips
+  // view events down to analytics fields; this build keeps type on them so
+  // one listener can switch on every event.
   function emit(type) {
-    safeCall(widgetEventHandler, [{ type: type, quote: state.quote, checked: state.checked }], "onWidgetEvent");
+    var quote = state.quote;
+    safeCall(widgetEventHandler, [{
+      widget: "card",
+      type: type,
+      code: quote && quote.raw ? quote.raw.type : null,
+      meta: { checked: state.checked, quoteStatus: quote ? quote.status : null },
+    }], "onWidgetEvent");
   }
 
   function setChecked(checked, byShopper) {
