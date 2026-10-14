@@ -640,7 +640,7 @@ public class ExampleServer {
 
     /**
      * As above, but pass checkContract when the request carried a non-empty
-     * seel_services array, so a 200 that minted no contract is reported
+     * seel_services, so a 200 that minted no contract is reported
      * rather than echoed as success. Use
      * {@link SeelValidation#carriesCoverage} to decide - an order with no
      * coverage is a normal sync and must not be flagged.

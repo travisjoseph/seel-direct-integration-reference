@@ -272,6 +272,14 @@ def validate_order_payload(payload: dict) -> list[str]:
     return problems
 
 
+def attaches_coverage(payload: dict) -> bool:
+    """Whether create_order checks its response for a minted contract: only
+    when the request attached coverage. Any non-empty seel_services counts,
+    not only a list. An object there is a known attach mistake, and with
+    validation off it must still be checked rather than pass as covered."""
+    return bool(payload.get("seel_services"))
+
+
 def validate_merchant_payload(payload: dict) -> list[str]:
     """Return the problems with a Create Merchant payload."""
     return ([f"missing required field {f}" for f in _collect_missing(payload, _MERCHANT_REQUIRED)]
@@ -400,10 +408,10 @@ class SeelClient:
         except SeelAPIError as exc:
             # A non-JSON 2xx cannot show a contract, so on an attach it is a
             # failed attach (409), not a success to pass through.
-            if not (200 <= exc.status < 300 and self.check_contract and payload.get("seel_services")):
+            if not (200 <= exc.status < 300 and self.check_contract and attaches_coverage(payload)):
                 raise
             response = exc.body
-        if self.check_contract and payload.get("seel_services"):
+        if self.check_contract and attaches_coverage(payload):
             self._check_contract_minted(payload, response)
         return response
 
@@ -420,10 +428,11 @@ class SeelClient:
             )
         services = response.get("seel_services")
         if not isinstance(services, list) or not services:
+            sent = payload["seel_services"]
+            n = len(sent) if isinstance(sent, list) else 0
             raise SeelContractNotMintedError(
                 response,
-                f"sent {len(payload['seel_services'])} seel_services entr"
-                f"{'y' if len(payload['seel_services']) == 1 else 'ies'}, "
+                f"sent {n} seel_services entr{'y' if n == 1 else 'ies'}, "
                 f"response seel_services is {services!r}. Check seel_services is a "
                 "list and quote_id is inside it, not at the top level.",
             )

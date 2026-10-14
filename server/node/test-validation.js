@@ -19,6 +19,7 @@ const { test } = require("node:test");
 const {
   SeelClient,
   SeelContractNotMintedError,
+  attachesCoverage,
   validateMerchantPayload,
   validateOrderPayload,
   validateQuotePayload,
@@ -76,8 +77,6 @@ for (const testCase of contractCases) {
 
 for (const testCase of uncovered) {
   test(`gating: ${testCase.name}`, () => {
-    const services = testCase.request.seel_services;
-    const checked = Array.isArray(services) && services.length > 0;
-    assert.strictEqual(checked, testCase.expect_checked);
+    assert.strictEqual(attachesCoverage(testCase.request), testCase.expect_checked);
   });
 }

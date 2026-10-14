@@ -277,6 +277,19 @@ function validateOrderPayload(payload) {
   return problems;
 }
 
+/**
+ * Whether createOrder checks its response for a minted contract: only when
+ * the request attached coverage. Any non-empty seel_services counts, not
+ * only an array. An object there is a known attach mistake, and with
+ * validation off it must still be checked rather than pass as covered.
+ */
+function attachesCoverage(payload) {
+  const services = payload.seel_services;
+  if (Array.isArray(services)) return services.length > 0;
+  if (isPlainObject(services)) return Object.keys(services).length > 0;
+  return Boolean(services);
+}
+
 /** Return the problems with a Create Merchant payload. */
 function validateMerchantPayload(payload) {
   return asProblems(collectMissing(payload, MERCHANT_REQUIRED)).concat(
@@ -406,7 +419,7 @@ class SeelClient {
    */
   async createOrder(payload) {
     this._check("createOrder", validateOrderPayload(payload));
-    const attached = Array.isArray(payload.seel_services) && payload.seel_services.length > 0;
+    const attached = attachesCoverage(payload);
     let response;
     try {
       response = await this._request("POST", "/ecommerce/orders", payload);
@@ -435,7 +448,7 @@ class SeelClient {
     // A non-array is a failure, not something to skip: the ports must agree
     // on this or the check silently does nothing in one of them.
     if (!Array.isArray(services) || !services.length) {
-      const n = payload.seel_services.length;
+      const n = Array.isArray(payload.seel_services) ? payload.seel_services.length : 0;
       throw new SeelContractNotMintedError(
         response,
         `sent ${n} seel_services ${n === 1 ? "entry" : "entries"}, response ` +
@@ -580,5 +593,6 @@ module.exports = {
   validateQuotePayload,
   validateOrderPayload,
   validateMerchantPayload,
+  attachesCoverage,
   verifyWebhookSignature,
 };

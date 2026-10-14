@@ -488,6 +488,21 @@ pub fn validate_order_payload(payload: &Value) -> Vec<String> {
     problems
 }
 
+/// Whether `create_order` checks its response for a minted contract: only
+/// when the request attached coverage. Any non-empty `seel_services` counts,
+/// not only an array. An object there is a known attach mistake, and with
+/// validation off it must still be checked rather than pass as covered.
+pub fn attaches_coverage(payload: &Value) -> bool {
+    match payload.get("seel_services") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(Value::Number(n)) => n.as_f64().is_none_or(|f| f != 0.0),
+        Some(Value::String(s)) => !s.is_empty(),
+        Some(Value::Array(a)) => !a.is_empty(),
+        Some(Value::Object(o)) => !o.is_empty(),
+    }
+}
+
 /// Return the problems with a Create Merchant payload.
 pub fn validate_merchant_payload(payload: &Value) -> Vec<String> {
     let mut problems = as_problems(collect_missing(payload, MERCHANT_REQUIRED));
@@ -716,10 +731,7 @@ impl SeelClient {
     /// the caller's job.
     pub fn create_order(&self, payload: &Value) -> Result<Value, SeelError> {
         self.check("create_order", validate_order_payload(payload))?;
-        let attached = payload
-            .get("seel_services")
-            .and_then(Value::as_array)
-            .is_some_and(|s| !s.is_empty());
+        let attached = attaches_coverage(payload);
         let response = match self.request("POST", "/ecommerce/orders", Some(payload)) {
             // A non-JSON 2xx cannot show a contract, so on an attach it is a
             // failed attach (409), not a success to pass through.
@@ -997,11 +1009,8 @@ mod tests {
 
         for case in doc["uncovered_requests"].as_array().expect("uncovered_requests") {
             let name = case["name"].as_str().unwrap_or("<unnamed>");
-            let checked = case["request"]["seel_services"]
-                .as_array()
-                .is_some_and(|s| !s.is_empty());
             assert_eq!(
-                checked,
+                attaches_coverage(&case["request"]),
                 case["expect_checked"].as_bool().expect("expect_checked"),
                 "{name}"
             );
