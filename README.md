@@ -22,12 +22,13 @@ fields say `wfp` even where the product is sold as Worry-Free Delivery.
 | `server/node/` | Node 18+ built-ins. `node example-server.js` |
 | `server/rust/` | Small crate: ureq client, hyper example server. `cargo run` |
 | `server/java/` | JDK 17+ only. `javac *.java && java ExampleServer`. See [Java port](#java-port). |
-| `server/validation-cases.json` | Shared test fixture all four ports run. |
+| `server/dotnet/` | C# / ASP.NET Core, targets `net10.0`, .NET SDK only. `dotnet run --project Seel.ExampleServer`. See [.NET port](#net-port). |
+| `server/validation-cases.json` | Shared test fixture all five ports run. |
 
 Each server port has a client for every `/v1/ecommerce/*` endpoint and an
 example server. The example server is a quote proxy that keeps the API key
 out of the browser, plus order and fulfillment routes and a webhook endpoint
-that checks HMAC signatures. Node, Rust and Java are ports of the Python copy.
+that checks HMAC signatures. Node, Rust, Java and .NET are ports of the Python copy.
 
 ## Quickstart
 
@@ -41,8 +42,9 @@ Against sandbox, start a server, then point the demo at it. The example
 server does not serve the demo page.
 
 ```bash
-cd server/python   # or server/node, server/rust, server/java
+cd server/python   # or server/node, server/rust, server/java, server/dotnet
 SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... SEEL_MERCHANT_ID=... SEEL_QUOTE_TYPE=... python3 example_server.py
+# server/dotnet runs with: dotnet run --project Seel.ExampleServer
 # then, in widget/demo.html, replace the mock quoteFetcher with
 #   configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 ```
@@ -194,7 +196,7 @@ Seel's answer from a network problem:
 | Seel's own status | Seel rejected the request. The proxy passes Seel's error body through unchanged, so you see the field it objected to. |
 | `400` | The proxy rejected the request before sending. Validation failures carry a `problems` array listing every fault. Other rejections, such as malformed JSON, carry a plain `error`. |
 | `409` | Seel accepted the order but minted no contract, including a 2xx whose body is not JSON. The order exists upstream, so do not retry it. |
-| `408` | Rust only. The request body did not arrive within 30 seconds. |
+| `408` | Rust and .NET only. The request body did not arrive in time: within 30 seconds in Rust, or below Kestrel's minimum body data rate (240 bytes a second after a 5 second grace) in .NET. |
 | `413` | The request body is over 1 MiB. |
 | `502` | The proxy got no usable response from Seel. Usually Seel was unreachable and nothing was processed. If the connection dropped partway through Seel's answer, it may have processed the request, so look an order up before retrying it. |
 | `504` | Seel did not answer within 15 seconds. It may have processed the request, so look the order up before retrying. |
@@ -270,7 +272,7 @@ fields. This build keeps `type` on them.
 
 The base URL comes from `SEEL_BASE_URL` or the client constructor, so
 switching environments needs no code change. Each client also defines
-`SANDBOX_BASE_URL` and `PRODUCTION_BASE_URL`. Python, Node and Java default
+`SANDBOX_BASE_URL` and `PRODUCTION_BASE_URL`. Python, Node, Java and .NET default
 to sandbox when you pass no base URL. Rust requires one.
 
 Four values change between environments, not just the URL:
@@ -376,7 +378,7 @@ integration can look healthy while covering nothing:
 | `seel_services` sent as an object instead of an array | `500` from the JSON parser |
 | `seel_services` entry with no `price` | `200`, `contract_id: null`, `error: "system error"` inside the entry |
 
-The Python, Node and Rust clients check each `create_order` response that
+The Python, Node, Rust and .NET clients check each `create_order` response that
 attaches coverage for a real `contract_id` to catch this. In Java, call
 `SeelValidation.contractNotMintedReason`, as the example server does.
 
@@ -386,7 +388,7 @@ either way, so your code has to check both.
 
 ### Turning validation off
 
-The Python, Node and Rust clients run two checks, each with its own switch,
+The Python, Node, Rust and .NET clients run two checks, each with its own switch,
 both on by default:
 
 | Switch | What it does | Turn it off when |
@@ -409,6 +411,9 @@ new SeelClient(apiKey, baseUrl, apiVersion, timeoutMs, false, true)  // Node
 SeelClient::new(&key, &url).without_validation()                     // Rust
 SeelClient::new(&key, &url).without_contract_check()                 // Rust
 ```
+```csharp
+new SeelClientOptions { ApiKey = key, Validate = false, CheckContract = true }  // .NET
+```
 
 ### Errors
 
@@ -430,19 +435,50 @@ server uses to stamp, validate and check each request.
   response. The example server calls it. `SeelClient` does not, so call it
   yourself.
 
+## .NET port
+
+`server/dotnet/` is a solution of three projects on `net10.0`, with no
+NuGet packages beyond xUnit in the tests.
+
+- `Seel.Client` is a class library. `SeelClient` wraps an `HttpClient`, so
+  register it as a typed client with `services.AddHttpClient<SeelClient>()`
+  or construct it directly. Payloads are `JsonObject` and responses
+  `JsonNode`, so you are not forced into DTOs. `SeelValidation` holds the
+  validators and the contract-minted check, and `SeelWebhooks` the signature
+  check.
+- `Seel.ExampleServer` is the proxy on ASP.NET Core. `IRetailerResolver` is
+  `authenticate_caller` and `resolve_merchant_id`. Register your own
+  implementation in DI to replace `OriginRetailerResolver`.
+- `Seel.Tests` runs both shared fixtures, starts the server and a stub of
+  Seel in-process on Kestrel, and needs no network.
+
+It differs from the Python copy where Kestrel or the type system makes a
+different answer the honest one:
+
+- Kestrel answers some malformed requests itself, with an empty `400`,
+  before the proxy sees them. That covers a path that decodes to NUL and a
+  header with non-ASCII bytes. Neither reaches Seel.
+- A request body with a duplicate JSON key is a `400`. Python keeps the
+  last value.
+- A body that stalls gets Kestrel's `408`. See the status table.
+- `SeelWebhooks.VerifySignature` itself refuses an empty secret. The Python
+  function leaves that check to the server.
+- Routing matches the raw request target, because ASP.NET's routing
+  decodes most escapes before the id checks could see them.
+
 ## Tests
 
-All four ports run the same cases from `server/validation-cases.json`. The
-fixture catches drift between ports. It checks that all four make the same
+All five ports run the same cases from `server/validation-cases.json`. The
+fixture catches drift between ports. It checks that all five make the same
 accept or reject decision and report every expected field path, not that
 any one port is correct. The Python, Node and Java suites use only their
 runtime's standard library. The Rust suite uses the crate's own
-dependencies.
+dependencies. The .NET suite uses xUnit.
 
 The fixture covers payload validation and the contract-minted check,
 including when that check runs. It does not cover routing, path-parameter
-decoding or the proxy's error mapping, which differ per port. Python and
-Node test the proxy's error mapping and the client's transport edge cases
+decoding or the proxy's error mapping, which differ per port. Python,
+Node and .NET test the proxy's error mapping and the client's transport edge cases
 against a local mock of Seel. Rust tests routing, path decoding and the
 client's handling of 2xx bodies. Each port also checks that `get_merchant`
 sends a `GET` to the escaped merchant path.
@@ -450,7 +486,7 @@ sends a `GET` to the escaped merchant path.
 `widget/test-widget.js` covers the widget's `SeelSDK` contract against a
 stub DOM, using Node built-ins only.
 
-All four ports also run `server/binding-cases.json`, the merchant-binding
+All five ports also run `server/binding-cases.json`, the merchant-binding
 cases. Each case sends a quote or order with a given `Origin` and body
 `merchant_id` through the port's real request handler to a stub upstream,
 then checks the status, the merchant ID the stub received, the error and
@@ -464,6 +500,7 @@ python3 -m unittest discover server/python
 node --test server/node/test-validation.js server/node/test-proxy.js server/node/test-binding.js
 (cd server/rust && cargo test)
 (cd server/java && javac *.java && java SeelValidationTest && java SeelBindingTest)
+(cd server/dotnet && dotnet test)
 ```
 
 The Java suites read the fixtures relative to their own directory, hence
@@ -471,7 +508,7 @@ the subshell. Pass Node the file, not the directory: Node 24 treats
 `node --test server/node` as a module path and fails.
 
 When you change a required field, update `validation-cases.json` too.
-Changing one port alone fails the fixture. Changing all four and skipping
+Changing one port alone fails the fixture. Changing all five and skipping
 the fixture leaves it passing on a rule no port applies.
 
 ## Notes
