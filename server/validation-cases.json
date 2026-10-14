@@ -814,6 +814,103 @@
       "expect_contains": [
         "seel_services[0] must be an object"
       ]
+    },
+    {
+      "name": "quote: customer.email is required",
+      "operation": "quote",
+      "payload": {
+        "merchant_id": "m-1",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "type": "acme-wfp",
+        "is_default_on": true,
+        "customer": {
+          "customer_id": "c-1"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_contains": [
+        "customer.email"
+      ]
+    },
+    {
+      "name": "order: customer.email is required",
+      "operation": "order",
+      "payload": {
+        "merchant_id": "m-1",
+        "order_id": "o-1",
+        "order_number": "o-1",
+        "created_ts": "1789000000000",
+        "session_id": "s-1",
+        "device_category": "desktop",
+        "device_platform": "Web",
+        "customer": {
+          "customer_id": "c-1"
+        },
+        "shipping_address": {
+          "address_1": "1 Market St",
+          "city": "San Francisco",
+          "state": "CA",
+          "zipcode": "94105",
+          "country": "US"
+        },
+        "line_items": [
+          {
+            "line_item_id": "li-1",
+            "product_id": "p-1",
+            "product_title": "Test Shirt",
+            "quantity": 1,
+            "price": 50.0,
+            "allocated_discounts": 0.0,
+            "sales_tax": 4.13,
+            "final_price": 54.13,
+            "currency": "USD",
+            "requires_shipping": true,
+            "image_urls": [
+              "https://example.com/i.jpg"
+            ],
+            "category_1": "Apparel",
+            "category_2": "Shirts",
+            "is_final_sale": false,
+            "shipping_origin": {
+              "country": "US"
+            }
+          }
+        ]
+      },
+      "expect_contains": [
+        "customer.email"
+      ]
     }
   ],
   "contract_cases": [
