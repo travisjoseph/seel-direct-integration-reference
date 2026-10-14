@@ -61,8 +61,17 @@ onboarding:
 |---|---|
 | API key | `SEEL_API_KEY`, server-side only |
 | Webhook secret | `SEEL_WEBHOOK_SECRET`, server-side only |
-| Merchant ID (per retailer) | `SEEL_MERCHANT_ID`, or per request |
+| Merchant ID (per retailer) | `SEEL_MERCHANT_ID` for one retailer, `SEEL_RETAILER_MERCHANTS` for a platform with many |
 | Quote type (per program, e.g. `acme-wfp`) | `SEEL_QUOTE_TYPE`, or per request |
+
+`SEEL_RETAILER_MERCHANTS` is a JSON object that maps each retailer
+storefront origin to that retailer's merchant ID, for example
+`{"https://shop-a.example":"merchant-id-a"}`. Origins are matched
+case-insensitively and without a trailing slash. Invalid JSON, a value
+that is not a non-empty string, or setting it together with
+`SEEL_MERCHANT_ID` stops the server at startup. With neither set, the
+server takes `merchant_id` from the request body and prints a warning,
+which is only fit for a local demo.
 
 With `SEEL_MERCHANT_ID` and `SEEL_QUOTE_TYPE` set, the proxy stamps them
 into every quote request. The storefront embed is then identical for every
@@ -97,15 +106,29 @@ The proxy serves Seel's own paths, prefix included. A retailer already
 written against Seel moves onto a platform by setting `SEEL_BASE_URL` to the
 platform and changing nothing else.
 
-A platform starts by replacing two functions in the example server:
+A platform starts from two functions in the example server:
 
-| Function | Replace it with |
-|---|---|
-| `authenticate_caller` | Your own retailer authentication. Here it returns true for everyone, which is fine only because the server holds a sandbox key and binds `127.0.0.1` by default. Set `HOST` to expose it only once this function is real, or anyone who can reach the port can use the key. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
-| `resolve_merchant_id` | A lookup from the authenticated caller to that retailer's merchant ID. Here it falls back to the request body, which a real platform must not do. |
+| Function | What it does here | What a platform does |
+|---|---|---|
+| `authenticate_caller` | Returns the caller's identity, or nothing for a 401. The identity is the request's `Origin` header. A shopper's browser sets that header itself, so page script on one retailer's storefront cannot claim to be another's. Server-to-server calls (orders, fulfillments, cancel) carry no `Origin` and are accepted from anyone, which is fine only because the server holds a sandbox key and binds `127.0.0.1` by default. | Keeps the origin for browser quotes, and authenticates each retailer backend with the platform's own credentials. Set `HOST` to expose the server only once that is real. Never give a retailer the Seel API key. One key covers every retailer, so any holder could act as any other. |
+| `resolve_merchant_id` | Takes the caller and the request body. With `SEEL_RETAILER_MERCHANTS` set, it looks the caller's origin up in that table and stamps the result. An unknown or missing origin gets a 403, and so does a body `merchant_id` that names a different merchant. The body value is never forwarded. | Maps its backend credentials to a merchant the same way. Until it does, a create-order call without a registered `Origin` gets a 403 in table mode. |
+
+With the table set, CORS answers with the matched origin only, plus
+`Vary: Origin`, and leaves `Access-Control-Allow-Origin` off for any other
+origin. The `*` answer remains only when no table is set.
+
+The widget's `setMerchantId()` puts that ID in the quote body, so on a
+platform it must match the storefront's entry in the table. A mismatch is
+a misconfigured storefront and gets the 403 rather than a quote under the
+wrong merchant.
+
+The origin binds what a shopper's browser can do. It does not authenticate
+a script, since anything other than a browser can send any `Origin` it
+likes.
 
 Leave `SEEL_MERCHANT_ID` unset on a platform. It stamps one merchant onto
-every request, which only fits the single-retailer case.
+every request, which only fits the single-retailer case, and the server
+refuses to start with both set.
 
 The platform also has to check order ownership. The proxy takes `order_id`
 from the URL and never checks it against the caller, so one retailer could
@@ -427,16 +450,24 @@ sends a `GET` to the escaped merchant path.
 `widget/test-widget.js` covers the widget's `SeelSDK` contract against a
 stub DOM, using Node built-ins only.
 
+All four ports also run `server/binding-cases.json`, the merchant-binding
+cases. Each case sends a quote or order with a given `Origin` and body
+`merchant_id` through the port's real request handler to a stub upstream,
+then checks the status, the merchant ID the stub received, the error and
+the CORS header. A port that forwards the body `merchant_id` fails it. The
+same file checks that each port parses `SEEL_RETAILER_MERCHANTS` the same
+way and refuses the same malformed tables.
+
 ```bash
 node --test widget/test-widget.js
 python3 -m unittest discover server/python
-node --test server/node/test-validation.js server/node/test-proxy.js
+node --test server/node/test-validation.js server/node/test-proxy.js server/node/test-binding.js
 (cd server/rust && cargo test)
-(cd server/java && javac *.java && java SeelValidationTest)
+(cd server/java && javac *.java && java SeelValidationTest && java SeelBindingTest)
 ```
 
-The Java suite reads the fixture relative to its own directory, hence the
-subshell. Pass Node the file, not the directory: Node 24 treats
+The Java suites read the fixtures relative to their own directory, hence
+the subshell. Pass Node the file, not the directory: Node 24 treats
 `node --test server/node` as a module path and fails.
 
 When you change a required field, update `validation-cases.json` too.

@@ -1,0 +1,137 @@
+{
+  "_comment": "Shared merchant-binding cases, read by the test suite in every port. parse_cases feed SEEL_RETAILER_MERCHANTS through the port's startup parser: 'expected' is the parsed table, 'error': true means startup must refuse it. binding_cases drive a real request through the port's handler. Build the body from the 'quote: complete payload' or 'order: complete payload' case in validation-cases.json (by 'route'), then set merchant_id to body_merchant_id, or remove the key when body_merchant_id is null. single_merchant_id is SEEL_MERCHANT_ID and retailer_merchants is SEEL_RETAILER_MERCHANTS already parsed (null means unset). origin is the Origin request header (null means none is sent). Expect the response status; for 200, the merchant_id the upstream received; for 403, the exact error; and the Access-Control-Allow-Origin header (null means it must be absent). Every port must stamp the merchant it resolved, never the body value.",
+  "parse_cases": [
+    {
+      "name": "keys are lowercased and lose a trailing slash",
+      "raw": "{\"HTTPS://Dealer-A.Example/\": \"m-a\", \"http://localhost:8080\": \"m-local\"}",
+      "expected": {"https://dealer-a.example": "m-a", "http://localhost:8080": "m-local"}
+    },
+    {
+      "name": "an empty object is a valid, empty table",
+      "raw": "{}",
+      "expected": {}
+    },
+    {"name": "invalid JSON", "raw": "{\"https://dealer-a.example\": ", "error": true},
+    {"name": "top level must be an object", "raw": "[\"https://dealer-a.example\"]", "error": true},
+    {"name": "a number is not a merchant ID", "raw": "{\"https://dealer-a.example\": 42}", "error": true},
+    {"name": "null is not a merchant ID", "raw": "{\"https://dealer-a.example\": null}", "error": true},
+    {"name": "an empty string is not a merchant ID", "raw": "{\"https://dealer-a.example\": \"\"}", "error": true},
+    {
+      "name": "two spellings of one origin cannot name two merchants",
+      "raw": "{\"https://dealer-a.example\": \"m-a\", \"https://DEALER-A.example\": \"m-b\"}",
+      "error": true
+    }
+  ],
+  "binding_cases": [
+    {
+      "name": "platform: a known origin stamps its merchant",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://dealer-a.example",
+      "body_merchant_id": null,
+      "status": 200,
+      "merchant_id": "m-a",
+      "allow_origin": "https://dealer-a.example"
+    },
+    {
+      "name": "platform: the Origin header matches case-insensitively",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://Dealer-B.example",
+      "body_merchant_id": null,
+      "status": 200,
+      "merchant_id": "m-b",
+      "allow_origin": "https://dealer-b.example"
+    },
+    {
+      "name": "platform: a body merchant_id that agrees is accepted",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://dealer-a.example",
+      "body_merchant_id": "m-a",
+      "status": 200,
+      "merchant_id": "m-a",
+      "allow_origin": "https://dealer-a.example"
+    },
+    {
+      "name": "platform: a body merchant_id naming another retailer is refused",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://dealer-a.example",
+      "body_merchant_id": "m-b",
+      "status": 403,
+      "error": "merchant_id in the request body does not match the merchant for this storefront",
+      "allow_origin": "https://dealer-a.example"
+    },
+    {
+      "name": "platform: an unknown origin is refused",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://attacker.example",
+      "body_merchant_id": "m-a",
+      "status": 403,
+      "error": "request origin is not a registered storefront",
+      "allow_origin": null
+    },
+    {
+      "name": "platform: a missing origin is refused even with a body merchant_id",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": null,
+      "body_merchant_id": "m-a",
+      "status": 403,
+      "error": "request origin is not a registered storefront",
+      "allow_origin": null
+    },
+    {
+      "name": "platform: create order stamps the origin's merchant",
+      "route": "order",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://dealer-b.example",
+      "body_merchant_id": null,
+      "status": 200,
+      "merchant_id": "m-b",
+      "allow_origin": "https://dealer-b.example"
+    },
+    {
+      "name": "platform: create order refuses a mismatched body merchant_id",
+      "route": "order",
+      "single_merchant_id": null,
+      "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
+      "origin": "https://dealer-b.example",
+      "body_merchant_id": "m-a",
+      "status": 403,
+      "error": "merchant_id in the request body does not match the merchant for this storefront",
+      "allow_origin": "https://dealer-b.example"
+    },
+    {
+      "name": "single retailer: SEEL_MERCHANT_ID overrides the body",
+      "route": "quote",
+      "single_merchant_id": "m-solo",
+      "retailer_merchants": null,
+      "origin": "https://anywhere.example",
+      "body_merchant_id": "m-other",
+      "status": 200,
+      "merchant_id": "m-solo",
+      "allow_origin": "*"
+    },
+    {
+      "name": "demo: with nothing configured the body merchant_id is forwarded",
+      "route": "quote",
+      "single_merchant_id": null,
+      "retailer_merchants": null,
+      "origin": null,
+      "body_merchant_id": "m-body",
+      "status": 200,
+      "merchant_id": "m-body",
+      "allow_origin": "*"
+    }
+  ]
+}

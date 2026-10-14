@@ -30,11 +30,12 @@
 //!   retailers point at the platform instead of at Seel, and the platform
 //!   resolves which merchant each request belongs to. Retailers hold no Seel
 //!   credentials at all. See [`authenticate_caller`] and
-//!   [`resolve_merchant_id`], which are where a platform starts. They are
-//!   not the whole job: `order_id` comes off the URL and is never checked
-//!   against the caller, so nothing here stops one retailer touching
-//!   another's order. That mapping belongs to the platform - see the
-//!   README.
+//!   [`resolve_merchant_id`], which are where a platform starts, and
+//!   `SEEL_RETAILER_MERCHANTS`, which binds each retailer storefront's origin
+//!   to its merchant. They are not the whole job: `order_id` comes off the
+//!   URL and is never checked against the caller, so nothing here stops one
+//!   retailer touching another's order. That mapping belongs to the platform
+//!   - see the README.
 //!
 //! Run:
 //! ```text
@@ -47,7 +48,9 @@
 //! 2. in widget/demo.html, replace the mock quoteFetcher with
 //!    configure({ quoteEndpoint: "http://localhost:8787/v1/ecommerce/quotes" })
 
+use std::collections::HashMap;
 use std::convert::Infallible;
+use std::fmt;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -67,11 +70,67 @@ use tokio::net::TcpListener;
 struct Config {
     client: SeelClient,
     webhook_secret: String,
-    // Program values from Seel onboarding. When set, the proxy stamps them
-    // into every quote request, so storefront code stays identical across
+    merchants: MerchantBinding,
+    // Program value from Seel onboarding. When set, the proxy stamps it into
+    // every quote request, so storefront code stays identical across
     // programs.
-    merchant_id: String,
     quote_type: String,
+}
+
+/// Where the merchant stamped onto quotes and orders comes from.
+enum MerchantBinding {
+    /// Neither variable set: the body's merchant_id is forwarded. Demo only.
+    FromBody,
+    /// `SEEL_MERCHANT_ID`: one retailer, one merchant.
+    Single(String),
+    /// `SEEL_RETAILER_MERCHANTS`: normalized storefront origin to merchant_id.
+    PerOrigin(HashMap<String, String>),
+}
+
+impl MerchantBinding {
+    /// Build the binding from the raw `SEEL_MERCHANT_ID` and
+    /// `SEEL_RETAILER_MERCHANTS` values, where empty means unset.
+    fn from_env(merchant_id: &str, retailer_merchants: &str) -> Result<Self, String> {
+        match (merchant_id.is_empty(), retailer_merchants.is_empty()) {
+            (true, true) => Ok(MerchantBinding::FromBody),
+            (false, true) => Ok(MerchantBinding::Single(merchant_id.to_string())),
+            (true, false) => parse_retailer_merchants(retailer_merchants).map(MerchantBinding::PerOrigin),
+            // Both set is a contradiction, not a precedence question:
+            // SEEL_MERCHANT_ID would silently stamp one merchant onto every
+            // retailer in the table.
+            (false, false) => Err("set SEEL_MERCHANT_ID or SEEL_RETAILER_MERCHANTS, not both".to_string()),
+        }
+    }
+}
+
+fn normalize_origin(origin: &str) -> String {
+    origin.trim().to_lowercase().trim_end_matches('/').to_string()
+}
+
+/// Parse `SEEL_RETAILER_MERCHANTS` into {storefront origin: merchant_id}.
+///
+/// A bad table must stop startup: running on with a partial or empty one
+/// would refuse every retailer, or worse, bind a storefront to the wrong
+/// merchant.
+fn parse_retailer_merchants(raw: &str) -> Result<HashMap<String, String>, String> {
+    let table: Value = serde_json::from_str(raw)
+        .map_err(|err| format!("SEEL_RETAILER_MERCHANTS is not valid JSON: {err}"))?;
+    let Value::Object(table) = table else {
+        return Err("SEEL_RETAILER_MERCHANTS must be a JSON object of origin to merchant_id".to_string());
+    };
+    let mut parsed = HashMap::new();
+    for (origin, merchant_id) in table {
+        let merchant_id = match merchant_id {
+            Value::String(id) if !id.is_empty() => id,
+            _ => return Err(format!("SEEL_RETAILER_MERCHANTS[{origin:?}] must be a non-empty string")),
+        };
+        let key = normalize_origin(&origin);
+        if parsed.get(&key).is_some_and(|existing| *existing != merchant_id) {
+            return Err(format!("SEEL_RETAILER_MERCHANTS maps {key:?} to two merchants"));
+        }
+        parsed.insert(key, merchant_id);
+    }
+    Ok(parsed)
 }
 
 fn env_or(name: &str, default: &str) -> String {
@@ -100,18 +159,14 @@ fn json_response(status: u16, body: &Value) -> Reply {
     Response::builder()
         .status(status)
         .header("Content-Type", "application/json")
-        // Demo only; lock down in prod.
-        .header("Access-Control-Allow-Origin", "*")
         .body(Full::new(Bytes::from(body.to_string())))
         .unwrap_or_else(|err| unreachable!("static headers and a u16 status are always well-formed: {err}"))
 }
 
-/// CORS preflight for the demo page.
+/// CORS preflight for storefront pages.
 fn preflight_response() -> Reply {
     Response::builder()
         .status(204)
-        // Demo only; lock down in prod.
-        .header("Access-Control-Allow-Origin", "*")
         .header("Access-Control-Allow-Headers", "Content-Type")
         .header("Access-Control-Allow-Methods", "POST, OPTIONS")
         .body(Full::new(Bytes::new()))
@@ -200,44 +255,117 @@ async fn read_body(body: Incoming) -> Result<Vec<u8>, BodyReject> {
     }
 }
 
-/// Decide whether the caller may use this proxy.
-///
-/// This demo accepts everyone, which is only safe because it holds a sandbox
-/// key and listens on localhost.
-///
-/// A platform MUST replace this. Retailers authenticate to the platform with
-/// platform credentials - they never receive a Seel API key, because one key
-/// covers every retailer on the platform and would let any holder act as any
-/// other. A real implementation returns the caller's identity rather than
-/// a bool, and [`resolve_merchant_id`] takes it - changing both signatures
-/// is part of the work.
-fn authenticate_caller(_head: &Parts) -> bool {
-    true
+/// Who is calling. `origin` is the normalized Origin header, if one was sent.
+struct Caller {
+    origin: Option<String>,
 }
 
-/// Return the merchant ID this request belongs to.
+/// Why a request cannot be bound to a merchant. The handler answers 403.
+#[derive(Debug, PartialEq)]
+enum BindingError {
+    UnregisteredOrigin,
+    BodyMerchantMismatch,
+}
+
+impl fmt::Display for BindingError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(match self {
+            BindingError::UnregisteredOrigin => "request origin is not a registered storefront",
+            BindingError::BodyMerchantMismatch => {
+                "merchant_id in the request body does not match the merchant for this storefront"
+            }
+        })
+    }
+}
+
+/// Identify the caller, or return `None` to answer 401.
+///
+/// Browser quote requests come from a retailer's storefront, and the browser
+/// sets Origin itself; page script cannot change it. That makes the origin
+/// the caller's identity for the quote route, and [`resolve_merchant_id`]
+/// looks it up in `SEEL_RETAILER_MERCHANTS`. A non-browser client can send
+/// any Origin it likes, so this binds what a shopper's browser can do, not
+/// what a script with the proxy URL can.
+///
+/// Server-to-server routes (orders, fulfillments, cancel) have no Origin.
+/// This demo accepts them from anyone, which is only safe because it holds a
+/// sandbox key and listens on localhost. A platform authenticates its
+/// retailers' backends with its own credentials, returns the retailer
+/// identity here, and maps it to a merchant the same way the origin is
+/// mapped. Retailers never receive a Seel API key: one key covers every
+/// retailer on the platform and would let any holder act as any other.
+fn authenticate_caller(head: &Parts) -> Option<Caller> {
+    let origin = head.headers.get("Origin").and_then(|v| v.to_str().ok());
+    Some(Caller { origin: origin.map(normalize_origin) })
+}
+
+/// Return the merchant ID to stamp, or the reason the request is refused.
 ///
 /// Single retailer: `SEEL_MERCHANT_ID` is set once in the environment and
 /// stamped onto everything, so storefront and pipeline code carry no
 /// program-specific values.
 ///
-/// Platform proxy: leave `SEEL_MERCHANT_ID` unset and look the merchant up
-/// from the authenticated caller instead. Deriving it from the caller rather
-/// than trusting the request body is what stops one retailer quoting or
-/// ordering against another's merchant ID.
+/// Platform proxy: `SEEL_RETAILER_MERCHANTS` maps each storefront origin to
+/// its merchant. The merchant comes from the caller, never the body, which
+/// is what stops one retailer quoting or ordering against another's
+/// merchant ID. A body merchant_id that disagrees is refused rather than
+/// overwritten, so a misconfigured storefront fails loudly. The origin is
+/// the only identity this demo knows, so with a table set a backend call
+/// without one, such as create order, is refused until the platform maps
+/// its own retailer credentials here too.
 ///
-/// The body fallback below is a demo default so the unconfigured server
-/// still runs. It is not safe on a real platform: any caller can name any
-/// merchant. Replace it before anyone but you can reach this.
-fn resolve_merchant_id(config: &Config, params: &Value) -> String {
-    if !config.merchant_id.is_empty() {
-        return config.merchant_id.clone();
+/// With neither set, the body value is forwarded so the unconfigured demo
+/// still runs. Any caller can then name any merchant.
+fn resolve_merchant_id(config: &Config, caller: &Caller, params: &Value) -> Result<String, BindingError> {
+    let table = match &config.merchants {
+        MerchantBinding::Single(merchant_id) => return Ok(merchant_id.clone()),
+        MerchantBinding::FromBody => {
+            let body_value = params.get("merchant_id").and_then(Value::as_str);
+            return Ok(body_value.unwrap_or_default().to_string());
+        }
+        MerchantBinding::PerOrigin(table) => table,
+    };
+    let merchant_id = caller
+        .origin
+        .as_ref()
+        .and_then(|origin| table.get(origin))
+        .ok_or(BindingError::UnregisteredOrigin)?;
+    match params.get("merchant_id") {
+        Some(body_value) if body_value.as_str() != Some(merchant_id.as_str()) => {
+            Err(BindingError::BodyMerchantMismatch)
+        }
+        _ => Ok(merchant_id.clone()),
     }
-    params
-        .get("merchant_id")
-        .and_then(Value::as_str)
-        .unwrap_or_default()
-        .to_string()
+}
+
+/// Stamp the resolved merchant into `params`.
+fn stamp_merchant(config: &Config, caller: &Caller, params: &mut Value) -> Result<(), BindingError> {
+    let merchant_id = resolve_merchant_id(config, caller, params)?;
+    if let Some(obj) = params.as_object_mut() {
+        if !merchant_id.is_empty() {
+            obj.insert("merchant_id".to_string(), Value::String(merchant_id));
+        }
+    }
+    Ok(())
+}
+
+/// Set the CORS origin headers on any response.
+///
+/// With a retailer table, only a registered storefront may read responses,
+/// so the header echoes that origin and is omitted for any other.
+fn apply_cors(reply: &mut Reply, config: &Config, head: &Parts) {
+    let headers = reply.headers_mut();
+    let MerchantBinding::PerOrigin(table) = &config.merchants else {
+        headers.insert("Access-Control-Allow-Origin", "*".parse().expect("static header value"));
+        return;
+    };
+    headers.insert("Vary", "Origin".parse().expect("static header value"));
+    let origin = head.headers.get("Origin").and_then(|v| v.to_str().ok()).map(normalize_origin);
+    if let Some(origin) = origin.filter(|origin| table.contains_key(origin)) {
+        if let Ok(value) = origin.parse() {
+            headers.insert("Access-Control-Allow-Origin", value);
+        }
+    }
 }
 
 /// Map a Seel result onto the status and body the caller gets.
@@ -337,16 +465,19 @@ async fn read_json_object(body: Incoming) -> Result<Value, BodyReject> {
     }
 }
 
-async fn handle_quote(body: Incoming, config: &Arc<Config>) -> Reply {
+fn binding_refused(err: BindingError) -> Reply {
+    json_response(403, &json!({ "error": err.to_string() }))
+}
+
+async fn handle_quote(body: Incoming, config: &Arc<Config>, caller: &Caller) -> Reply {
     let mut params = match read_json_object(body).await {
         Ok(v) => v,
         Err(reject) => return reject.into_response(),
     };
-    let merchant_id = resolve_merchant_id(config, &params);
+    if let Err(err) = stamp_merchant(config, caller, &mut params) {
+        return binding_refused(err);
+    }
     if let Some(obj) = params.as_object_mut() {
-        if !merchant_id.is_empty() {
-            obj.insert("merchant_id".to_string(), Value::String(merchant_id));
-        }
         if !config.quote_type.is_empty() {
             obj.insert("type".to_string(), Value::String(config.quote_type.clone()));
         }
@@ -358,16 +489,13 @@ async fn handle_quote(body: Incoming, config: &Arc<Config>) -> Reply {
 /// Sync every order, opted in or not. On opt-in the body carries
 /// seel_services with the quote_id and price, which mints the contract and
 /// fires contract.created.
-async fn handle_create_order(body: Incoming, config: &Arc<Config>) -> Reply {
+async fn handle_create_order(body: Incoming, config: &Arc<Config>, caller: &Caller) -> Reply {
     let mut params = match read_json_object(body).await {
         Ok(v) => v,
         Err(reject) => return reject.into_response(),
     };
-    let merchant_id = resolve_merchant_id(config, &params);
-    if let Some(obj) = params.as_object_mut() {
-        if !merchant_id.is_empty() {
-            obj.insert("merchant_id".to_string(), Value::String(merchant_id));
-        }
+    if let Err(err) = stamp_merchant(config, caller, &mut params) {
+        return binding_refused(err);
     }
     let result = call_seel(config, move |client| client.create_order(&params)).await;
     result_response("order", result)
@@ -452,32 +580,35 @@ async fn handle_webhook(head: &Parts, body: Incoming, config: &Arc<Config>) -> R
 
 async fn handle_request(request: Request<Incoming>, config: Arc<Config>) -> Result<Reply, Infallible> {
     let (head, body) = request.into_parts();
+    let mut reply = route_request(&head, body, &config).await;
+    apply_cors(&mut reply, &config, &head);
+    Ok(reply)
+}
+
+async fn route_request(head: &Parts, body: Incoming, config: &Arc<Config>) -> Reply {
     if head.method == Method::OPTIONS {
-        return Ok(preflight_response());
+        return preflight_response();
     }
     if head.method != Method::POST {
-        return Ok(json_response(404, &json!({"error": "not found"})));
+        return json_response(404, &json!({"error": "not found"}));
     }
 
     let route = parse_route(head.uri.path());
     // The webhook route is authenticated by its HMAC signature instead.
-    if !matches!(route, Route::Webhook) && !authenticate_caller(&head) {
-        return Ok(json_response(401, &json!({"error": "unauthorized"})));
-    }
-
-    Ok(match route {
-        Route::Quote => handle_quote(body, &config).await,
-        Route::Webhook => handle_webhook(&head, body, &config).await,
-        Route::CreateOrder => handle_create_order(body, &config).await,
-        Route::UpdateOrder(id) => handle_update_order(body, &config, id).await,
-        Route::CancelOrder(id) => handle_cancel_order(&config, id).await,
-        Route::CreateFulfillment(id) => handle_create_fulfillment(body, &config, id).await,
-        Route::UpdateFulfillment(id, fid) => {
-            handle_update_fulfillment(body, &config, id, fid).await
+    match (route, authenticate_caller(head)) {
+        (Route::Webhook, _) => handle_webhook(head, body, config).await,
+        (_, None) => json_response(401, &json!({"error": "unauthorized"})),
+        (Route::Quote, Some(caller)) => handle_quote(body, config, &caller).await,
+        (Route::CreateOrder, Some(caller)) => handle_create_order(body, config, &caller).await,
+        (Route::UpdateOrder(id), Some(_)) => handle_update_order(body, config, id).await,
+        (Route::CancelOrder(id), Some(_)) => handle_cancel_order(config, id).await,
+        (Route::CreateFulfillment(id), Some(_)) => handle_create_fulfillment(body, config, id).await,
+        (Route::UpdateFulfillment(id, fid), Some(_)) => {
+            handle_update_fulfillment(body, config, id, fid).await
         }
-        Route::BadPathParam => json_response(400, &json!({"error": "invalid order id in path"})),
-        Route::NotFound => json_response(404, &json!({"error": "not found"})),
-    })
+        (Route::BadPathParam, Some(_)) => json_response(400, &json!({"error": "invalid order id in path"})),
+        (Route::NotFound, Some(_)) => json_response(404, &json!({"error": "not found"})),
+    }
 }
 
 async fn serve(listener: TcpListener, config: Arc<Config>) {
@@ -521,14 +652,30 @@ fn main() {
     let api_key = env_or("SEEL_API_KEY", "");
     let base_url = env_or("SEEL_BASE_URL", SANDBOX_BASE_URL);
 
+    let single = env_or("SEEL_MERCHANT_ID", "");
+    let table = env_or("SEEL_RETAILER_MERCHANTS", "");
+    let merchants = match MerchantBinding::from_env(&single, &table) {
+        Ok(m) => m,
+        Err(err) => {
+            eprintln!("error: {err}");
+            std::process::exit(1);
+        }
+    };
+
     if api_key.is_empty() {
         println!("warning: SEEL_API_KEY not set - quote proxy will fail");
+    }
+    if matches!(merchants, MerchantBinding::FromBody) {
+        println!(
+            "warning: neither SEEL_MERCHANT_ID nor SEEL_RETAILER_MERCHANTS set - \
+             merchant_id is taken from the request body, which only a demo may do"
+        );
     }
 
     let config = Arc::new(Config {
         client: SeelClient::new(&api_key, &base_url),
         webhook_secret: env_or("SEEL_WEBHOOK_SECRET", ""),
-        merchant_id: env_or("SEEL_MERCHANT_ID", ""),
+        merchants,
         quote_type: env_or("SEEL_QUOTE_TYPE", ""),
     });
 
@@ -717,5 +864,203 @@ mod tests {
 
         let body_timed_out = SeelError::Io(std::io::Error::new(std::io::ErrorKind::TimedOut, "slow body"));
         assert_eq!(map_result("order", Err(body_timed_out)).0, 504);
+    }
+
+    fn read_fixture(name: &str) -> Value {
+        let path = format!("{}/../{name}", env!("CARGO_MANIFEST_DIR"));
+        let raw = std::fs::read_to_string(&path).unwrap_or_else(|err| panic!("read {path}: {err}"));
+        serde_json::from_str(&raw).unwrap_or_else(|err| panic!("parse {path}: {err}"))
+    }
+
+    #[test]
+    fn shared_parse_cases() {
+        let fixture = read_fixture("binding-cases.json");
+        let cases = fixture["parse_cases"].as_array().expect("parse_cases array");
+        assert!(cases.len() >= 5, "parse_cases fixture is too small");
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let parsed = parse_retailer_merchants(case["raw"].as_str().unwrap());
+            if case["error"] == json!(true) {
+                assert!(parsed.is_err(), "{name}: accepted {parsed:?}");
+            } else {
+                let expected: HashMap<String, String> =
+                    serde_json::from_value(case["expected"].clone()).unwrap();
+                assert_eq!(parsed.as_ref(), Ok(&expected), "{name}");
+            }
+        }
+    }
+
+    #[test]
+    fn both_merchant_settings_refuse_startup() {
+        let err = MerchantBinding::from_env("m-solo", r#"{"https://shop-a.example": "m-a"}"#).err();
+        assert_eq!(err.as_deref(), Some("set SEEL_MERCHANT_ID or SEEL_RETAILER_MERCHANTS, not both"));
+    }
+
+    /// A stand-in for Seel that records each request body and echoes it back.
+    fn recording_upstream() -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        use std::io::{BufRead, BufReader, Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let received = Arc::new(std::sync::Mutex::new(Vec::new()));
+        let log = Arc::clone(&received);
+        std::thread::spawn(move || {
+            for stream in listener.incoming() {
+                let mut stream = stream.unwrap();
+                let mut reader = BufReader::new(stream.try_clone().unwrap());
+                let mut length = 0;
+                loop {
+                    let mut line = String::new();
+                    reader.read_line(&mut line).unwrap();
+                    if line == "\r\n" || line.is_empty() {
+                        break;
+                    }
+                    if let Some((name, value)) = line.split_once(':') {
+                        if name.eq_ignore_ascii_case("content-length") {
+                            length = value.trim().parse().unwrap();
+                        }
+                    }
+                }
+                let mut body = vec![0; length];
+                reader.read_exact(&mut body).unwrap();
+                log.lock().unwrap().push(serde_json::from_slice(&body).unwrap());
+                let head = format!(
+                    "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+                );
+                stream.write_all(head.as_bytes()).unwrap();
+                stream.write_all(&body).unwrap();
+            }
+        });
+        (url, received)
+    }
+
+    struct Answer {
+        status: u16,
+        headers: HashMap<String, String>,
+        body: String,
+    }
+
+    /// Run the real hyper service with `merchants` and send it one request.
+    fn send(
+        merchants: MerchantBinding,
+        upstream: &str,
+        method: &str,
+        path: &str,
+        origin: Option<&str>,
+        body: &str,
+    ) -> Answer {
+        use std::io::{Read, Write};
+        let runtime = tokio::runtime::Runtime::new().unwrap();
+        let listener = runtime.block_on(TcpListener::bind("127.0.0.1:0")).unwrap();
+        let addr = listener.local_addr().unwrap();
+        let config = Arc::new(Config {
+            client: SeelClient::new("dummy", upstream),
+            webhook_secret: String::new(),
+            merchants,
+            quote_type: String::new(),
+        });
+        runtime.spawn(serve(listener, config));
+
+        let mut stream = std::net::TcpStream::connect(addr).unwrap();
+        let origin_header = origin.map(|o| format!("Origin: {o}\r\n")).unwrap_or_default();
+        write!(
+            stream,
+            "{method} {path} HTTP/1.1\r\nHost: {addr}\r\nContent-Type: application/json\r\n{origin_header}Content-Length: {}\r\nConnection: close\r\n\r\n{body}",
+            body.len()
+        )
+        .unwrap();
+        let mut raw = String::new();
+        stream.read_to_string(&mut raw).unwrap();
+        let (head, body) = raw.split_once("\r\n\r\n").unwrap();
+        let mut lines = head.lines();
+        let status = lines.next().unwrap().split(' ').nth(1).unwrap().parse().unwrap();
+        let headers = lines
+            .filter_map(|line| line.split_once(':'))
+            .map(|(name, value)| (name.to_ascii_lowercase(), value.trim().to_string()))
+            .collect();
+        Answer { status, headers, body: body.to_string() }
+    }
+
+    fn binding_from_case(case: &Value) -> MerchantBinding {
+        match (&case["single_merchant_id"], &case["retailer_merchants"]) {
+            (Value::String(id), Value::Null) => MerchantBinding::Single(id.clone()),
+            (Value::Null, Value::Null) => MerchantBinding::FromBody,
+            (Value::Null, table) => MerchantBinding::PerOrigin(serde_json::from_value(table.clone()).unwrap()),
+            other => panic!("case sets both merchant settings: {other:?}"),
+        }
+    }
+
+    /// Every case goes through the real request handler to a stub upstream,
+    /// so a port that forwards the body merchant_id fails on the merchant
+    /// the stub saw, not on a unit-level return value.
+    #[test]
+    fn shared_binding_cases() {
+        let fixture = read_fixture("binding-cases.json");
+        let validation = read_fixture("validation-cases.json");
+        let payloads: HashMap<&str, &Value> = validation["cases"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .filter(|c| matches!(c["name"].as_str(), Some("quote: complete payload" | "order: complete payload")))
+            .map(|c| (c["operation"].as_str().unwrap(), &c["payload"]))
+            .collect();
+        let cases = fixture["binding_cases"].as_array().expect("binding_cases array");
+        assert!(cases.len() >= 5, "binding_cases fixture is too small");
+        let (upstream, received) = recording_upstream();
+
+        for case in cases {
+            let name = case["name"].as_str().unwrap();
+            let route = case["route"].as_str().unwrap();
+            let mut payload = payloads[route].clone();
+            let obj = payload.as_object_mut().unwrap();
+            obj.remove("merchant_id");
+            if !case["body_merchant_id"].is_null() {
+                obj.insert("merchant_id".to_string(), case["body_merchant_id"].clone());
+            }
+            let path = if route == "quote" { "/v1/ecommerce/quotes" } else { "/v1/ecommerce/orders" };
+            received.lock().unwrap().clear();
+
+            let answer = send(
+                binding_from_case(case),
+                &upstream,
+                "POST",
+                path,
+                case["origin"].as_str(),
+                &payload.to_string(),
+            );
+
+            assert_eq!(answer.status, case["status"].as_u64().unwrap() as u16, "{name}: {}", answer.body);
+            assert_eq!(
+                answer.headers.get("access-control-allow-origin").map(String::as_str),
+                case["allow_origin"].as_str(),
+                "{name}"
+            );
+            let seen = received.lock().unwrap().clone();
+            if answer.status == 200 {
+                assert_eq!(seen.len(), 1, "{name}");
+                assert_eq!(seen[0]["merchant_id"], case["merchant_id"], "{name}");
+            } else {
+                let body: Value = serde_json::from_str(&answer.body).unwrap();
+                assert_eq!(body, json!({ "error": case["error"] }), "{name}");
+                assert!(seen.is_empty(), "{name}: a refused request reached Seel");
+            }
+        }
+    }
+
+    #[test]
+    fn preflight_echoes_only_a_registered_origin() {
+        let table = || {
+            MerchantBinding::PerOrigin(HashMap::from([(
+                "https://dealer-a.example".to_string(),
+                "m-a".to_string(),
+            )]))
+        };
+        let path = "/v1/ecommerce/quotes";
+        let known = send(table(), "http://127.0.0.1:9", "OPTIONS", path, Some("https://dealer-a.example"), "");
+        let unknown = send(table(), "http://127.0.0.1:9", "OPTIONS", path, Some("https://other.example"), "");
+        assert_eq!(known.status, 204);
+        assert_eq!(known.headers["access-control-allow-origin"], "https://dealer-a.example");
+        assert_eq!(known.headers["vary"], "Origin");
+        assert!(!unknown.headers.contains_key("access-control-allow-origin"));
+        assert_eq!(unknown.headers["vary"], "Origin");
     }
 }
