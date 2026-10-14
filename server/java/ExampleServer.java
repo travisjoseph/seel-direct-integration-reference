@@ -31,10 +31,11 @@
  *   retailers point at the platform instead of at Seel, and the platform
  *   resolves which merchant each request belongs to. Retailers hold no Seel
  *   credentials at all. See authenticateCaller() and resolveMerchantId()
- *   below, which are where a platform starts. They are not the whole job:
- *   order_id comes off the URL and is never checked against the caller, so
- *   nothing here stops one retailer touching another's order. That mapping
- *   belongs to the platform - see the README.
+ *   below, which are where a platform starts, and SEEL_RETAILER_MERCHANTS,
+ *   which binds each retailer storefront's origin to its merchant. They are
+ *   not the whole job: order_id comes off the URL and is never checked
+ *   against the caller, so nothing here stops one retailer touching
+ *   another's order. That mapping belongs to the platform - see the README.
  *
  * Compile and run:
  *   javac *.java
@@ -63,6 +64,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.Arrays;
 import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.Executors;
 
@@ -76,13 +78,40 @@ public class ExampleServer {
     static final String API_KEY = env("SEEL_API_KEY", "");
     static final String WEBHOOK_SECRET = env("SEEL_WEBHOOK_SECRET", "");
     static final String BASE_URL = env("SEEL_BASE_URL", SeelClient.SANDBOX_BASE_URL);
-    // Program values from Seel onboarding. When set, the proxy stamps them
-    // into every quote request, so storefront code stays identical across
+    // Program value from Seel onboarding. When set, the proxy stamps it into
+    // every quote request, so storefront code stays identical across
     // programs.
-    static final String MERCHANT_ID = env("SEEL_MERCHANT_ID", "");
     static final String QUOTE_TYPE = env("SEEL_QUOTE_TYPE", "");
 
-    static final SeelClient client = new SeelClient(API_KEY, BASE_URL);
+    /**
+     * What the handler reads per request: the Seel client and how a request
+     * is bound to a merchant. merchantId is SEEL_MERCHANT_ID ("" when
+     * unset); retailerMerchants is SEEL_RETAILER_MERCHANTS parsed, or null
+     * when unset.
+     */
+    record Config(SeelClient client, String merchantId, Map<String, String> retailerMerchants) {
+        Config {
+            // Both set is a contradiction, not a precedence question:
+            // SEEL_MERCHANT_ID would silently stamp one merchant onto every
+            // retailer in the table.
+            if (!merchantId.isEmpty() && retailerMerchants != null) {
+                throw new IllegalArgumentException(
+                        "set SEEL_MERCHANT_ID or SEEL_RETAILER_MERCHANTS, not both");
+            }
+            if (retailerMerchants != null) {
+                retailerMerchants = Map.copyOf(retailerMerchants);
+            }
+        }
+
+        static Config fromEnv() {
+            String raw = env("SEEL_RETAILER_MERCHANTS", "");
+            return new Config(new SeelClient(API_KEY, BASE_URL), env("SEEL_MERCHANT_ID", ""),
+                    raw.isEmpty() ? null : parseRetailerMerchants(raw));
+        }
+    }
+
+    /** Set once in main before the server starts. */
+    static volatile Config config;
 
     /** A call out to Seel, for {@link #forward}. */
     @FunctionalInterface
@@ -90,43 +119,146 @@ public class ExampleServer {
         String call() throws Exception;
     }
 
-    /**
-     * Decide whether the caller may use this proxy.
-     *
-     * <p>This demo accepts everyone, which is only safe because it holds a
-     * sandbox key and listens on localhost.
-     *
-     * <p>A platform MUST replace this. Retailers authenticate to the platform
-     * with platform credentials - they never receive a Seel API key, because
-     * one key covers every retailer on the platform and would let any holder
-     * act as any other. A real implementation returns the caller's identity
-     * rather than a boolean, and {@link #resolveMerchantId} takes it -
-     * changing both signatures is part of the work.
-     */
-    static boolean authenticateCaller(HttpExchange exchange) {
-        return true;
+    static String normalizeOrigin(String origin) {
+        String normalized = origin.strip().toLowerCase(Locale.ROOT);
+        int end = normalized.length();
+        while (end > 0 && normalized.charAt(end - 1) == '/') {
+            end--;
+        }
+        return normalized.substring(0, end);
     }
 
     /**
-     * Return the merchant ID this request belongs to.
+     * Parse SEEL_RETAILER_MERCHANTS into {storefront origin: merchant_id}.
+     *
+     * <p>Throws IllegalArgumentException on anything malformed. A bad table
+     * must stop startup: running on with a partial or empty one would refuse
+     * every retailer, or worse, bind a storefront to the wrong merchant.
+     */
+    static Map<String, String> parseRetailerMerchants(String raw) {
+        Object table = SeelValidation.parseJson(raw);
+        if (table == null) {
+            throw new IllegalArgumentException("SEEL_RETAILER_MERCHANTS is not valid JSON");
+        }
+        if (!(table instanceof Map)) {
+            throw new IllegalArgumentException(
+                    "SEEL_RETAILER_MERCHANTS must be a JSON object of origin to merchant_id");
+        }
+        Map<String, String> parsed = new LinkedHashMap<>();
+        for (Map.Entry<?, ?> entry : ((Map<?, ?>) table).entrySet()) {
+            String origin = (String) entry.getKey();
+            if (!(entry.getValue() instanceof String merchantId) || merchantId.isEmpty()) {
+                throw new IllegalArgumentException(
+                        "SEEL_RETAILER_MERCHANTS[\"" + origin + "\"] must be a non-empty string");
+            }
+            String key = normalizeOrigin(origin);
+            if (!parsed.getOrDefault(key, merchantId).equals(merchantId)) {
+                throw new IllegalArgumentException(
+                        "SEEL_RETAILER_MERCHANTS maps \"" + key + "\" to two merchants");
+            }
+            parsed.put(key, merchantId);
+        }
+        return parsed;
+    }
+
+    /** Who is calling. origin is the normalized Origin header, or null. */
+    record Caller(String origin) {}
+
+    /** The request cannot be bound to a merchant; the handler answers 403. */
+    static final class MerchantBindingException extends Exception {
+        MerchantBindingException(String message) {
+            super(message);
+        }
+    }
+
+    /**
+     * Identify the caller, or return null to answer 401.
+     *
+     * <p>Browser quote requests come from a retailer's storefront, and the
+     * browser sets Origin itself; page script cannot change it. That makes
+     * the origin the caller's identity for the quote route, and
+     * {@link #resolveMerchantId} looks it up in SEEL_RETAILER_MERCHANTS. A
+     * non-browser client can send any Origin it likes, so this binds what a
+     * shopper's browser can do, not what a script with the proxy URL can.
+     *
+     * <p>Server-to-server routes (orders, fulfillments, cancel) have no
+     * Origin. This demo accepts them from anyone, which is only safe because
+     * it holds a sandbox key and listens on localhost. A platform
+     * authenticates its retailers' backends with its own credentials,
+     * returns the retailer identity here, and maps it to a merchant the same
+     * way the origin is mapped. Retailers never receive a Seel API key: one
+     * key covers every retailer on the platform and would let any holder act
+     * as any other.
+     */
+    static Caller authenticateCaller(HttpExchange exchange) {
+        String origin = exchange.getRequestHeaders().getFirst("Origin");
+        return new Caller(origin == null || origin.isEmpty() ? null : normalizeOrigin(origin));
+    }
+
+    /**
+     * Return the merchant ID to stamp, or throw MerchantBindingException.
      *
      * <p>Single retailer: SEEL_MERCHANT_ID is set once in the environment and
      * stamped onto everything, so storefront and pipeline code carry no
      * program-specific values.
      *
-     * <p>Platform proxy: leave SEEL_MERCHANT_ID unset and look the merchant up
-     * from the authenticated caller instead. Deriving it from the caller
-     * rather than trusting the request body is what stops one retailer
-     * quoting or ordering against another's merchant ID.
+     * <p>Platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin
+     * to its merchant. The merchant comes from the caller, never the body,
+     * which is what stops one retailer quoting or ordering against another's
+     * merchant ID. A body merchant_id that disagrees is refused rather than
+     * overwritten, so a misconfigured storefront fails loudly. The origin is
+     * the only identity this demo knows, so with a table set a backend call
+     * without one, such as create order, is refused until the platform maps
+     * its own retailer credentials here too.
+     *
+     * <p>With neither set, the body value is forwarded so the unconfigured
+     * demo still runs. Any caller can then name any merchant.
      */
-    static String resolveMerchantId(HttpExchange exchange) {
-        // Unlike the other ports there is no request-body fallback here.
-        // When SEEL_MERCHANT_ID is unset nothing is stamped and the
-        // caller's own merchant_id passes through untouched, which is the
-        // same end result and carries the same warning: on a real
-        // platform, derive the merchant from the authenticated caller
-        // instead of trusting whatever the body says.
-        return MERCHANT_ID;
+    static String resolveMerchantId(Caller caller, Map<String, Object> params)
+            throws MerchantBindingException {
+        Config cfg = config;
+        if (!cfg.merchantId().isEmpty()) {
+            return cfg.merchantId();
+        }
+        if (cfg.retailerMerchants() == null) {
+            return params.get("merchant_id") instanceof String body ? body : "";
+        }
+        String merchantId = caller.origin() == null ? null : cfg.retailerMerchants().get(caller.origin());
+        if (merchantId == null) {
+            throw new MerchantBindingException("request origin is not a registered storefront");
+        }
+        if (params.containsKey("merchant_id") && !merchantId.equals(params.get("merchant_id"))) {
+            throw new MerchantBindingException(
+                    "merchant_id in the request body does not match the merchant for this storefront");
+        }
+        return merchantId;
+    }
+
+    /**
+     * The Access-Control-Allow-Origin value for this request, or null.
+     *
+     * <p>With a retailer table, only a registered storefront may read
+     * responses, so the header echoes that origin and is omitted for any
+     * other.
+     */
+    static String allowedOrigin(HttpExchange exchange) {
+        Map<String, String> table = config.retailerMerchants();
+        if (table == null) {
+            return "*";
+        }
+        String origin = exchange.getRequestHeaders().getFirst("Origin");
+        String normalized = normalizeOrigin(origin == null ? "" : origin);
+        return table.containsKey(normalized) ? normalized : null;
+    }
+
+    private static void setCorsOrigin(HttpExchange exchange) {
+        String origin = allowedOrigin(exchange);
+        if (origin != null) {
+            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", origin);
+        }
+        if (config.retailerMerchants() != null) {
+            exchange.getResponseHeaders().set("Vary", "Origin");
+        }
     }
 
     private static String env(String name, String fallback) {
@@ -154,8 +286,7 @@ public class ExampleServer {
             throws IOException {
         byte[] data = jsonBody.getBytes(StandardCharsets.UTF_8);
         exchange.getResponseHeaders().set("Content-Type", "application/json");
-        // demo only; lock down in prod
-        exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        setCorsOrigin(exchange);
         exchange.sendResponseHeaders(status, data.length);
         // Closing the response body stream (try-with-resources) flushes the
         // full response to the client.
@@ -173,7 +304,7 @@ public class ExampleServer {
      * leave the client waiting on an open connection with nothing sent,
      * which is how a deeply nested body used to hang its caller.
      */
-    private static void handle(HttpExchange exchange) throws IOException {
+    static void handle(HttpExchange exchange) throws IOException {
         try {
             route(exchange);
         } catch (Throwable t) {
@@ -202,9 +333,8 @@ public class ExampleServer {
             path = path.substring(0, q);
         }
 
-        if (method.equalsIgnoreCase("OPTIONS")) { // CORS preflight for the demo page
-            // demo only; lock down in prod
-            exchange.getResponseHeaders().set("Access-Control-Allow-Origin", "*");
+        if (method.equalsIgnoreCase("OPTIONS")) { // CORS preflight for storefront pages
+            setCorsOrigin(exchange);
             exchange.getResponseHeaders().set("Access-Control-Allow-Headers", "Content-Type");
             exchange.getResponseHeaders().set("Access-Control-Allow-Methods", "POST, OPTIONS");
             exchange.sendResponseHeaders(204, -1); // -1 = no response body
@@ -227,13 +357,14 @@ public class ExampleServer {
             return;
         }
 
-        if (!authenticateCaller(exchange)) {
+        Caller caller = authenticateCaller(exchange);
+        if (caller == null) {
             respond(exchange, 401, "{\"error\": \"unauthorized\"}");
             return;
         }
 
         if (path.equals("/v1/ecommerce/quotes")) {
-            handleQuote(exchange, body);
+            handleQuote(exchange, caller, body);
             return;
         }
 
@@ -251,15 +382,14 @@ public class ExampleServer {
                 if (params == null) {
                     return;
                 }
-                String merchantId = resolveMerchantId(exchange);
-                if (!merchantId.isEmpty()) {
-                    params.put("merchant_id", merchantId);
+                if (!stampMerchant(exchange, caller, params)) {
+                    return;
                 }
                 if (!validate(exchange, "create_order", SeelValidation.validateOrder(params))) {
                     return;
                 }
                 String json = SeelValidation.toJson(params);
-                forward(exchange, "order", () -> client.createOrder(json),
+                forward(exchange, "order", () -> config.client().createOrder(json),
                         SeelValidation.carriesCoverage(json));
                 return;
             }
@@ -277,12 +407,12 @@ public class ExampleServer {
                 if (params == null) {
                     return;
                 }
-                forward(exchange, "order update", () -> client.updateOrder(orderId, params));
+                forward(exchange, "order update", () -> config.client().updateOrder(orderId, params));
                 return;
             }
             // Cancel carries no body.
             if (seg.length == 5 && seg[4].equals("cancel")) {
-                forward(exchange, "order cancel", () -> client.cancelOrder(orderId));
+                forward(exchange, "order cancel", () -> config.client().cancelOrder(orderId));
                 return;
             }
             if (seg.length == 5 && seg[4].equals("fulfillments")) {
@@ -291,7 +421,7 @@ public class ExampleServer {
                     return;
                 }
                 forward(exchange, "fulfillment",
-                        () -> client.createFulfillment(orderId, params));
+                        () -> config.client().createFulfillment(orderId, params));
                 return;
             }
             if (seg.length == 6 && seg[4].equals("fulfillments") && !seg[5].isEmpty()) {
@@ -305,7 +435,7 @@ public class ExampleServer {
                     return;
                 }
                 forward(exchange, "fulfillment update",
-                        () -> client.updateFulfillment(orderId, fulfillmentId, params));
+                        () -> config.client().updateFulfillment(orderId, fulfillmentId, params));
                 return;
             }
         }
@@ -580,16 +710,32 @@ public class ExampleServer {
         }
     }
 
-    private static void handleQuote(HttpExchange exchange, byte[] body) throws IOException {
+    /** Stamp the resolved merchant into params, or answer 403 and return false. */
+    private static boolean stampMerchant(
+            HttpExchange exchange, Caller caller, Map<String, Object> params) throws IOException {
+        String merchantId;
+        try {
+            merchantId = resolveMerchantId(caller, params);
+        } catch (MerchantBindingException e) {
+            respond(exchange, 403, error(e.getMessage()));
+            return false;
+        }
+        // Set on the parsed map, so a caller-supplied merchant_id is
+        // overwritten rather than left to win as a duplicate key.
+        if (!merchantId.isEmpty()) {
+            params.put("merchant_id", merchantId);
+        }
+        return true;
+    }
+
+    private static void handleQuote(HttpExchange exchange, Caller caller, byte[] body)
+            throws IOException {
         Map<String, Object> params = jsonBody(exchange, body);
         if (params == null) {
             return;
         }
-        // Set on the parsed map, so a caller-supplied merchant_id or type
-        // is overwritten rather than left to win as a duplicate key.
-        String merchantId = resolveMerchantId(exchange);
-        if (!merchantId.isEmpty()) {
-            params.put("merchant_id", merchantId);
+        if (!stampMerchant(exchange, caller, params)) {
+            return;
         }
         if (!QUOTE_TYPE.isEmpty()) {
             params.put("type", QUOTE_TYPE);
@@ -598,7 +744,7 @@ public class ExampleServer {
             return;
         }
         String json = SeelValidation.toJson(params);
-        forward(exchange, "quote", () -> client.createQuote(json));
+        forward(exchange, "quote", () -> config.client().createQuote(json));
     }
 
     private static void handleWebhook(HttpExchange exchange, byte[] body) throws IOException {
@@ -631,6 +777,11 @@ public class ExampleServer {
     public static void main(String[] args) throws IOException {
         if (API_KEY.isEmpty()) {
             System.out.println("warning: SEEL_API_KEY not set - quote proxy will fail");
+        }
+        config = Config.fromEnv();
+        if (config.merchantId().isEmpty() && config.retailerMerchants() == null) {
+            System.out.println("warning: neither SEEL_MERCHANT_ID nor SEEL_RETAILER_MERCHANTS set - "
+                    + "merchant_id is taken from the request body, which only a demo may do");
         }
         // A connection that never finishes sending its request is dropped
         // after this many seconds. Read by the JDK server once, at startup,
