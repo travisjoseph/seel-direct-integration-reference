@@ -145,6 +145,8 @@ gateway.
 A platform that holds one API key creates a separate Seel merchant for each
 retailer. It runs the same lifecycle for every one of them.
 
+For a .NET platform, [server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) walks this lifecycle with diagrams and names the file and function behind each step.
+
 **Enable a retailer.** Call `create_merchant()` with a `seel_services`
 entry that sets `is_enabled` to true, `is_default_on` and `coverages`.
 Store the returned `merchant_id` against that retailer's storefront. Every
@@ -439,6 +441,8 @@ server uses to stamp, validate and check each request.
 
 `server/dotnet/` is a solution of three projects on `net10.0`, with no
 NuGet packages beyond xUnit in the tests.
+
+[server/dotnet/INTEGRATION.md](server/dotnet/INTEGRATION.md) is the platform handoff. It shows the end-to-end flow in five diagrams, who owns each piece, and a build checklist.
 
 - `Seel.Client` is a class library. `SeelClient` wraps an `HttpClient`, so
   register it as a typed client with `services.AddHttpClient<SeelClient>()`
