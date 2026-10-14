@@ -1050,15 +1050,15 @@ mod tests {
     fn preflight_echoes_only_a_registered_origin() {
         let table = || {
             MerchantBinding::PerOrigin(HashMap::from([(
-                "https://dealer-a.example".to_string(),
+                "https://shop-a.example".to_string(),
                 "m-a".to_string(),
             )]))
         };
         let path = "/v1/ecommerce/quotes";
-        let known = send(table(), "http://127.0.0.1:9", "OPTIONS", path, Some("https://dealer-a.example"), "");
+        let known = send(table(), "http://127.0.0.1:9", "OPTIONS", path, Some("https://shop-a.example"), "");
         let unknown = send(table(), "http://127.0.0.1:9", "OPTIONS", path, Some("https://other.example"), "");
         assert_eq!(known.status, 204);
-        assert_eq!(known.headers["access-control-allow-origin"], "https://dealer-a.example");
+        assert_eq!(known.headers["access-control-allow-origin"], "https://shop-a.example");
         assert_eq!(known.headers["vary"], "Origin");
         assert!(!unknown.headers.contains_key("access-control-allow-origin"));
         assert_eq!(unknown.headers["vary"], "Origin");

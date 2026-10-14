@@ -190,14 +190,14 @@ public class SeelBindingTest {
 
     private static void preflight(SeelClient client) throws Exception {
         ExampleServer.config = new ExampleServer.Config(
-                client, "", Map.of("https://dealer-a.example", "m-a"));
+                client, "", Map.of("https://shop-a.example", "m-a"));
         HttpResponse<String> known =
-                send("OPTIONS", PATHS.get("quote"), null, "https://dealer-a.example");
+                send("OPTIONS", PATHS.get("quote"), null, "https://shop-a.example");
         HttpResponse<String> unknown =
                 send("OPTIONS", PATHS.get("quote"), null, "https://other.example");
         check("preflight known origin",
                 known.headers().firstValue("Access-Control-Allow-Origin")
-                        .orElse("").equals("https://dealer-a.example")
+                        .orElse("").equals("https://shop-a.example")
                         && known.headers().firstValue("Vary").orElse("").equals("Origin"),
                 "got " + known.headers().map());
         check("preflight unknown origin",
@@ -207,7 +207,7 @@ public class SeelBindingTest {
 
     private static void bothConfigured(SeelClient client) {
         try {
-            new ExampleServer.Config(client, "m-solo", Map.of("https://dealer-a.example", "m-a"));
+            new ExampleServer.Config(client, "m-solo", Map.of("https://shop-a.example", "m-a"));
             check("config with both SEEL_MERCHANT_ID and a table", false, "was accepted");
         } catch (IllegalArgumentException expected) {
             check("config with both SEEL_MERCHANT_ID and a table", true, "");
