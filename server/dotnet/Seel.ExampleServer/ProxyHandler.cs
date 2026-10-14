@@ -58,9 +58,12 @@ public sealed partial class ProxyHandler(
                 _ => Error(404, "not found"),
             };
         }
-        // Kestrel throws this for a body it could not read (malformed chunks,
-        // a body that stalls), and this handler throws it for every request
-        // it refuses before calling Seel.
+        catch (RequestRefused refusal)
+        {
+            result = Error(refusal.Status, refusal.Message);
+        }
+        // Kestrel's own verdict on a body it could not read: malformed
+        // chunks, or a body that stalls (408).
         catch (BadHttpRequestException exc)
         {
             result = Error(exc.StatusCode, exc.Message);
@@ -157,7 +160,7 @@ public sealed partial class ProxyHandler(
 
     private IResult ReceiveWebhook(HttpContext context, byte[] body)
     {
-        string? signature = context.Request.Headers[SeelWebhooks.SignatureHeader];
+        var signature = context.Request.Headers[SeelWebhooks.SignatureHeader].FirstOrDefault();
         if (!SeelWebhooks.VerifySignature(body, signature, config.WebhookSecret))
         {
             return Error(401, "invalid signature");
@@ -266,7 +269,7 @@ public sealed partial class ProxyHandler(
         }
         catch (MerchantBindingException exc)
         {
-            throw new BadHttpRequestException(exc.Message, 403);
+            throw new RequestRefused(403, exc.Message);
         }
         if (merchantId is not null)
         {
@@ -276,24 +279,23 @@ public sealed partial class ProxyHandler(
     }
 
     private static string Id(string rawSegment, string error) =>
-        PathParams.SafeDecode(rawSegment) ?? throw new BadHttpRequestException(error, 400);
+        PathParams.SafeDecode(rawSegment) ?? throw new RequestRefused(400, error);
 
     private static JsonObject ParseObject(byte[] body)
     {
         JsonNode? node;
         try
         {
-            node = JsonNode.Parse(body);
-            // JsonObject builds its dictionary lazily and throws on a
-            // duplicate key at that point; force it here so the failure is a
-            // 400 rather than a crash inside validation.
-            _ = (node as JsonObject)?.Count;
+            // Refuse duplicate keys while parsing. JsonObject otherwise builds
+            // each nested dictionary lazily and throws on a duplicate the
+            // first time validation touches it, deep inside the upstream call.
+            node = JsonNode.Parse(body, documentOptions: StrictJson);
         }
-        catch (Exception exc) when (exc is JsonException or ArgumentException)
+        catch (JsonException)
         {
-            throw new BadHttpRequestException("request body must be JSON", 400);
+            throw new RequestRefused(400, "request body must be JSON");
         }
-        return node as JsonObject ?? throw new BadHttpRequestException("request body must be a JSON object", 400);
+        return node as JsonObject ?? throw new RequestRefused(400, "request body must be a JSON object");
     }
 
     /// <summary>
@@ -325,8 +327,15 @@ public sealed partial class ProxyHandler(
         return buffer.ToArray();
     }
 
-    private static BadHttpRequestException TooLarge() =>
-        new($"request body exceeds {MaxBodyBytes} bytes", 413);
+    private static RequestRefused TooLarge() => new(413, $"request body exceeds {MaxBodyBytes} bytes");
+
+    private static readonly JsonDocumentOptions StrictJson = new() { AllowDuplicateProperties = false };
+
+    /// <summary>A request refused before anything is sent to Seel.</summary>
+    private sealed class RequestRefused(int status, string error) : Exception(error)
+    {
+        public int Status { get; } = status;
+    }
 
     private static IResult Error(int status, string message) =>
         Results.Json(new JsonObject { ["error"] = message }, statusCode: status);

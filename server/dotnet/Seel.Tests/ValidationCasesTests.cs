@@ -10,6 +10,9 @@ namespace Seel.Tests;
 /// </summary>
 public class ValidationCasesTests
 {
+    // One HttpClient for the class, as an application holds one.
+    private static readonly HttpClient Http = new();
+
     public static TheoryData<string> Cases => Fixtures.Names(Fixtures.Validation, "cases");
 
     public static TheoryData<string> ContractCases => Fixtures.Names(Fixtures.Validation, "contract_cases");
@@ -88,11 +91,38 @@ public class ValidationCasesTests
             SeelValidation.AttachesCoverage(testCase["request"]!.AsObject()));
     }
 
+    // Python gates on truthiness, so an object-shaped seel_services (the
+    // attach mistake) is still checked once validation is off.
+    [Theory]
+    [InlineData("{\"type\":\"acme-wfp\",\"quote_id\":\"q-1\"}", true)]
+    [InlineData("\"x\"", true)]
+    [InlineData("1", true)]
+    [InlineData("{}", false)]
+    [InlineData("\"\"", false)]
+    [InlineData("0", false)]
+    [InlineData("false", false)]
+    [InlineData("null", false)]
+    public async Task CreateOrderChecksAnyNonEmptySeelServices(string services, bool checkedForContract)
+    {
+        await using var seel = await StubSeel.StartAsync();
+        var client = new SeelClient(Http, new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl, Validate = false });
+        var order = Fixtures.CompletePayload("order");
+        order["seel_services"] = JsonNode.Parse(services);
+        if (checkedForContract)
+        {
+            await Assert.ThrowsAsync<SeelContractNotMintedException>(() => client.CreateOrderAsync(order));
+        }
+        else
+        {
+            Assert.Equal("[]", (await client.CreateOrderAsync(order))!.ToJsonString());
+        }
+    }
+
     [Fact]
     public async Task CreateOrderSkipsTheContractCheckOnAnUncoveredOrder()
     {
         await using var seel = await StubSeel.StartAsync();
-        var client = new SeelClient(new HttpClient(), new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl });
+        var client = new SeelClient(Http, new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl });
         var response = await client.CreateOrderAsync(Fixtures.CompletePayload("order"));
         Assert.Equal("[]", response!.ToJsonString());
     }
@@ -101,12 +131,12 @@ public class ValidationCasesTests
     public async Task CreateOrderChecksTheContractOnAnAttach()
     {
         await using var seel = await StubSeel.StartAsync();
-        var client = new SeelClient(new HttpClient(), new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl });
+        var client = new SeelClient(Http, new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl });
         var order = Fixtures.CompletePayload("order");
         order["seel_services"] = new JsonArray(new JsonObject { ["type"] = "acme-wfp", ["quote_id"] = "q-1", ["price"] = 0.98 });
         await Assert.ThrowsAsync<SeelContractNotMintedException>(() => client.CreateOrderAsync(order));
 
-        var lenient = new SeelClient(new HttpClient(),
+        var lenient = new SeelClient(Http,
             new SeelClientOptions { ApiKey = "k", BaseUrl = seel.BaseUrl, CheckContract = false });
         Assert.Equal("[]", (await lenient.CreateOrderAsync(order))!.ToJsonString());
     }

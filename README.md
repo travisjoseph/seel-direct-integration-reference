@@ -458,8 +458,13 @@ different answer the honest one:
 - Kestrel answers some malformed requests itself, with an empty `400`,
   before the proxy sees them. That covers a path that decodes to NUL and a
   header with non-ASCII bytes. Neither reaches Seel.
-- A request body with a duplicate JSON key is a `400`. Python keeps the
-  last value.
+- A request body with a duplicate JSON key, at any depth, is a `400`, and
+  so is one nested deeper than 64 levels. Python keeps the last value of a
+  duplicate and nests about 1,000 deep.
+- `SEEL_RETAILER_MERCHANTS` with the same key twice and two different
+  merchants stops startup. Python keeps the last one.
+- The 15 second timeout covers the whole call. Python's applies to each
+  socket read.
 - A body that stalls gets Kestrel's `408`. See the status table.
 - `SeelWebhooks.VerifySignature` itself refuses an empty secret. The Python
   function leaves that check to the server.

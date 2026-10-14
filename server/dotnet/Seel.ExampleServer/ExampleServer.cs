@@ -12,8 +12,9 @@ public static class ExampleServer
     {
         var builder = WebApplication.CreateSlimBuilder();
         builder.WebHost.UseUrls($"http://{config.Host}:{config.Port}");
-        // Keep the startup line, drop ASP.NET's per-request info logs.
+        // Keep the startup line, drop the per-request info logs.
         builder.Logging.AddFilter("Microsoft.AspNetCore", LogLevel.Warning);
+        builder.Logging.AddFilter("System.Net.Http.HttpClient", LogLevel.Warning);
         builder.Services.AddSingleton(config);
         builder.Services.AddSingleton(config.Seel);
         builder.Services.AddHttpClient<SeelClient>();

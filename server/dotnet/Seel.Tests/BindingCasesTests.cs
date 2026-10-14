@@ -109,6 +109,15 @@ public class BindingCasesTests
         Assert.Null(AllowOrigin(unknown));
     }
 
+    [Fact]
+    public async Task WithoutATableEveryOriginGetsStarAndNoVary()
+    {
+        await using var server = await RunningServer.StartAsync(RunningServer.Config("http://127.0.0.1:9"));
+        using var response = await Preflight(server, "https://anywhere.example");
+        Assert.Equal("*", AllowOrigin(response));
+        Assert.Empty(response.Headers.Vary);
+    }
+
     private static Task<HttpResponseMessage> Preflight(RunningServer server, string origin)
     {
         var request = new HttpRequestMessage(HttpMethod.Options, "/v1/ecommerce/quotes");

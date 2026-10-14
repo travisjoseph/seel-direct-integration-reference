@@ -79,10 +79,10 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
     /// Each seel_services entry needs a coverages key. Omitting it returns a
     /// 500 rather than a validation error, so this checks it first.
     /// </remarks>
-    public Task<JsonNode?> CreateMerchantAsync(JsonObject payload, CancellationToken ct = default)
+    public async Task<JsonNode?> CreateMerchantAsync(JsonObject payload, CancellationToken ct = default)
     {
         Check("create_merchant", SeelValidation.ValidateMerchant(payload));
-        return SendAsync(HttpMethod.Post, "/ecommerce/merchants", payload, ct);
+        return await SendAsync(HttpMethod.Post, "/ecommerce/merchants", payload, ct).ConfigureAwait(false);
     }
 
     /// <summary>
@@ -108,10 +108,10 @@ public sealed class SeelClient(HttpClient http, SeelClientOptions options)
     /// https://developer.seel.com/reference/createquote list the required
     /// fields, including price + sales_tax - allocated_discounts == final_price.
     /// </remarks>
-    public Task<JsonNode?> CreateQuoteAsync(JsonObject payload, CancellationToken ct = default)
+    public async Task<JsonNode?> CreateQuoteAsync(JsonObject payload, CancellationToken ct = default)
     {
         Check("create_quote", SeelValidation.ValidateQuote(payload));
-        return SendAsync(HttpMethod.Post, "/ecommerce/quotes", payload, ct);
+        return await SendAsync(HttpMethod.Post, "/ecommerce/quotes", payload, ct).ConfigureAwait(false);
     }
 
     public Task<JsonNode?> GetQuoteAsync(string quoteId, CancellationToken ct = default) =>

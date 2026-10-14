@@ -47,7 +47,7 @@ public sealed class OriginRetailerResolver(MerchantBinding binding) : IRetailerR
     /// </remarks>
     public Caller? AuthenticateCaller(HttpRequest request)
     {
-        string? origin = request.Headers.Origin;
+        var origin = request.Headers.Origin.FirstOrDefault();
         return new Caller(string.IsNullOrEmpty(origin) ? null : MerchantBinding.NormalizeOrigin(origin));
     }
 

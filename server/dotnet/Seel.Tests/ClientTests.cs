@@ -4,8 +4,11 @@ namespace Seel.Tests;
 
 public class ClientTests
 {
+    // One HttpClient for the class, as an application holds one.
+    private static readonly HttpClient Http = new();
+
     private static SeelClient Client(StubSeel seel, TimeSpan? timeout = null, bool validate = true) =>
-        new(new HttpClient(), new SeelClientOptions
+        new(Http, new SeelClientOptions
         {
             ApiKey = "dummy",
             BaseUrl = seel.BaseUrl + "/",

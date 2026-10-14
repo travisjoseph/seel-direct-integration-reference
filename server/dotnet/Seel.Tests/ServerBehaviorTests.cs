@@ -162,6 +162,7 @@ public class ServerBehaviorTests(ServerFixture fixture) : IClassFixture<ServerFi
     [Theory]
     [InlineData("{\"a\":", "request body must be JSON")]
     [InlineData("{\"a\":1,\"a\":2}", "request body must be JSON")]
+    [InlineData("{\"customer\":{\"email\":\"a\",\"email\":\"b\"}}", "request body must be JSON")]
     [InlineData("[1]", "request body must be a JSON object")]
     public async Task UnusableJsonIs400(string body, string error)
     {

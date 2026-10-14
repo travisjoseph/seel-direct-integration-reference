@@ -118,11 +118,27 @@ public static class SeelValidation
 
     /// <summary>
     /// Whether create_order checks its response for a minted contract: only
-    /// when the request attached coverage, meaning seel_services is a non-empty
-    /// array.
+    /// when the request attached coverage.
     /// </summary>
-    public static bool AttachesCoverage(JsonObject request) =>
-        request["seel_services"] is JsonArray { Count: > 0 };
+    /// <remarks>
+    /// Any non-empty seel_services counts, not only an array. An object there
+    /// is a known attach mistake, and with validation off it must still be
+    /// caught here rather than pass as a covered order.
+    /// </remarks>
+    public static bool AttachesCoverage(JsonObject request) => request["seel_services"] switch
+    {
+        null => false,
+        JsonArray items => items.Count > 0,
+        JsonObject fields => fields.Count > 0,
+        JsonValue value => value.GetValueKind() switch
+        {
+            JsonValueKind.False or JsonValueKind.Null => false,
+            JsonValueKind.String => value.GetValue<string>().Length > 0,
+            JsonValueKind.Number => value.GetValue<double>() != 0,
+            _ => true,
+        },
+        _ => true,
+    };
 
     /// <summary>
     /// Fail loudly when an attach silently did not take.
@@ -141,7 +157,12 @@ public static class SeelValidation
         }
         if (body["seel_services"] is not JsonArray { Count: > 0 } services)
         {
-            var sent = (request["seel_services"] as JsonArray)?.Count ?? 0;
+            var sent = request["seel_services"] switch
+            {
+                JsonArray items => items.Count,
+                JsonObject fields => fields.Count,
+                _ => 1,
+            };
             throw new SeelContractNotMintedException(
                 response,
                 $"sent {sent} seel_services {(sent == 1 ? "entry" : "entries")}, response "
