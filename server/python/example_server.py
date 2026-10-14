@@ -29,10 +29,11 @@ Two deployments use these routes differently:
   retailers point at the platform instead of at Seel, and the platform
   resolves which merchant each request belongs to. Retailers hold no Seel
   credentials at all. See authenticate_caller() and resolve_merchant_id()
-  below, which are where a platform starts. They are not the whole job:
-  order_id comes off the URL and is never checked against the caller, so
-  nothing here stops one retailer touching another's order. That mapping
-  belongs to the platform - see the README.
+  below, which are where a platform starts, and SEEL_RETAILER_MERCHANTS,
+  which binds each retailer storefront's origin to its merchant. They are
+  not the whole job: order_id comes off the URL and is never checked
+  against the caller, so nothing here stops one retailer touching
+  another's order. That mapping belongs to the platform - see the README.
 
 Run:
   SEEL_API_KEY=... SEEL_WEBHOOK_SECRET=... python3 example_server.py
@@ -47,7 +48,9 @@ doesn't serve the demo page:
 import json
 import os
 import re
+from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from typing import Optional
 from urllib.parse import unquote
 
 from seel_client import (
@@ -75,6 +78,42 @@ BASE_URL = os.environ.get("SEEL_BASE_URL", SANDBOX_BASE_URL)
 # every quote request, so storefront code stays identical across programs.
 MERCHANT_ID = os.environ.get("SEEL_MERCHANT_ID", "")
 QUOTE_TYPE = os.environ.get("SEEL_QUOTE_TYPE", "")
+
+
+def normalize_origin(origin: str) -> str:
+    return origin.strip().lower().rstrip("/")
+
+
+def parse_retailer_merchants(raw: str) -> dict:
+    """Parse SEEL_RETAILER_MERCHANTS into {storefront origin: merchant_id}.
+
+    Raises ValueError on anything malformed. A bad table must stop startup:
+    running on with a partial or empty one would refuse every retailer, or
+    worse, bind a storefront to the wrong merchant.
+    """
+    try:
+        table = json.loads(raw)
+    except json.JSONDecodeError as exc:
+        raise ValueError(f"SEEL_RETAILER_MERCHANTS is not valid JSON: {exc}") from None
+    if not isinstance(table, dict):
+        raise ValueError("SEEL_RETAILER_MERCHANTS must be a JSON object of origin to merchant_id")
+    parsed = {}
+    for origin, merchant_id in table.items():
+        if not isinstance(merchant_id, str) or not merchant_id:
+            raise ValueError(f"SEEL_RETAILER_MERCHANTS[{origin!r}] must be a non-empty string")
+        key = normalize_origin(origin)
+        if parsed.get(key, merchant_id) != merchant_id:
+            raise ValueError(f"SEEL_RETAILER_MERCHANTS maps {key!r} to two merchants")
+        parsed[key] = merchant_id
+    return parsed
+
+
+_raw_table = os.environ.get("SEEL_RETAILER_MERCHANTS", "")
+RETAILER_MERCHANTS = parse_retailer_merchants(_raw_table) if _raw_table else None
+# Both set is a contradiction, not a precedence question: SEEL_MERCHANT_ID
+# would silently stamp one merchant onto every retailer in the table.
+if MERCHANT_ID and RETAILER_MERCHANTS is not None:
+    raise ValueError("set SEEL_MERCHANT_ID or SEEL_RETAILER_MERCHANTS, not both")
 
 client = SeelClient(api_key=API_KEY, base_url=BASE_URL)
 
@@ -139,41 +178,82 @@ def safe_path_param(raw: str):
     return decoded
 
 
-def authenticate_caller(headers) -> bool:
-    """Decide whether the caller may use this proxy.
+@dataclass(frozen=True)
+class Caller:
+    """Who is calling. origin is the normalized Origin header, or None."""
 
-    This demo accepts everyone, which is only safe because it holds a
-    sandbox key and listens on localhost.
+    origin: Optional[str]
 
-    A platform MUST replace this. Retailers authenticate to the platform
-    with platform credentials - they never receive a Seel API key, because
-    one key covers every retailer on the platform and would let any holder
-    act as any other. A real implementation returns the caller's identity
-    rather than a bool, and resolve_merchant_id() takes it - changing both
-    signatures is part of the work.
+
+class MerchantBindingError(Exception):
+    """The request cannot be bound to a merchant; the handler answers 403."""
+
+
+def authenticate_caller(headers) -> Optional[Caller]:
+    """Identify the caller, or return None to answer 401.
+
+    Browser quote requests come from a retailer's storefront, and the
+    browser sets Origin itself; page script cannot change it. That makes
+    the origin the caller's identity for the quote route, and
+    resolve_merchant_id() looks it up in SEEL_RETAILER_MERCHANTS. A
+    non-browser client can send any Origin it likes, so this binds what a
+    shopper's browser can do, not what a script with the proxy URL can.
+
+    Server-to-server routes (orders, fulfillments, cancel) have no Origin.
+    This demo accepts them from anyone, which is only safe because it holds
+    a sandbox key and listens on localhost. A platform authenticates its
+    retailers' backends with its own credentials, returns the retailer
+    identity here, and maps it to a merchant the same way the origin is
+    mapped. Retailers never receive a Seel API key: one key covers every
+    retailer on the platform and would let any holder act as any other.
     """
-    return True
+    origin = headers.get("Origin")
+    return Caller(origin=normalize_origin(origin) if origin else None)
 
 
-def resolve_merchant_id(params: dict) -> str:
-    """Return the merchant ID this request belongs to.
+def resolve_merchant_id(caller: Caller, params: dict) -> str:
+    """Return the merchant ID to stamp, or raise MerchantBindingError.
 
     Single retailer: SEEL_MERCHANT_ID is set once in the environment and
     stamped onto everything, so storefront and pipeline code carry no
     program-specific values.
 
-    Platform proxy: leave SEEL_MERCHANT_ID unset and look the merchant up
-    from the authenticated caller instead. Deriving it from the caller
-    rather than trusting the request body is what stops one retailer
-    quoting or ordering against another's merchant ID.
+    Platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to
+    its merchant. The merchant comes from the caller, never the body, which
+    is what stops one retailer quoting or ordering against another's
+    merchant ID. A body merchant_id that disagrees is refused rather than
+    overwritten, so a misconfigured storefront fails loudly. The origin is
+    the only identity this demo knows, so with a table set a backend call
+    without one, such as create order, is refused until the platform maps
+    its own retailer credentials here too.
 
-    The body fallback below is a demo default so the unconfigured server
-    still runs. It is not safe on a real platform: any caller can name any
-    merchant. Replace it before anyone but you can reach this.
+    With neither set, the body value is forwarded so the unconfigured demo
+    still runs. Any caller can then name any merchant.
     """
     if MERCHANT_ID:
         return MERCHANT_ID
-    return params.get("merchant_id", "")
+    if RETAILER_MERCHANTS is None:
+        return params.get("merchant_id", "")
+    merchant_id = RETAILER_MERCHANTS.get(caller.origin)
+    if merchant_id is None:
+        raise MerchantBindingError("request origin is not a registered storefront")
+    if "merchant_id" in params and params["merchant_id"] != merchant_id:
+        raise MerchantBindingError(
+            "merchant_id in the request body does not match the merchant for this storefront"
+        )
+    return merchant_id
+
+
+def allowed_origin(headers) -> Optional[str]:
+    """The Access-Control-Allow-Origin value for this request, or None.
+
+    With a retailer table, only a registered storefront may read responses,
+    so the header echoes that origin and is omitted for any other.
+    """
+    if RETAILER_MERCHANTS is None:
+        return "*"
+    origin = normalize_origin(headers.get("Origin") or "")
+    return origin if origin in RETAILER_MERCHANTS else None
 
 
 def handle_webhook_event(event: dict) -> None:
@@ -197,14 +277,21 @@ class Handler(BaseHTTPRequestHandler):
         data = json.dumps(body).encode()
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
-        self.send_header("Access-Control-Allow-Origin", "*")  # demo only; lock down in prod
+        self._send_cors_origin()
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def do_OPTIONS(self):  # CORS preflight for the demo page
+    def _send_cors_origin(self) -> None:
+        origin = allowed_origin(self.headers)
+        if origin:
+            self.send_header("Access-Control-Allow-Origin", origin)
+        if RETAILER_MERCHANTS is not None:
+            self.send_header("Vary", "Origin")
+
+    def do_OPTIONS(self):  # CORS preflight for storefront pages
         self.send_response(204)
-        self.send_header("Access-Control-Allow-Origin", "*")
+        self._send_cors_origin()
         self.send_header("Access-Control-Allow-Headers", "Content-Type")
         self.send_header("Access-Control-Allow-Methods", "POST, OPTIONS")
         self.end_headers()
@@ -259,6 +346,17 @@ class Handler(BaseHTTPRequestHandler):
         while self.rfile.readline(65537) not in (b"\r\n", b"\n", b""):
             pass  # trailer fields carry nothing this server uses
         return bytes(body)
+
+    def _stamp_merchant(self, caller: Caller, params: dict) -> bool:
+        """Stamp the resolved merchant into params, or answer 403 and return False."""
+        try:
+            merchant_id = resolve_merchant_id(caller, params)
+        except MerchantBindingError as exc:
+            self._respond(403, {"error": str(exc)})
+            return False
+        if merchant_id:
+            params["merchant_id"] = merchant_id
+        return True
 
     def _forward(self, label: str, call) -> None:
         """Call Seel and mirror the result back to the caller.
@@ -330,17 +428,19 @@ class Handler(BaseHTTPRequestHandler):
         # would 404 a request the others route.
         path = self.path.split("?", 1)[0]
 
-        if path != WEBHOOK_PATH and not authenticate_caller(self.headers):
-            self._respond(401, {"error": "unauthorized"})
-            return
+        caller = None
+        if path != WEBHOOK_PATH:
+            caller = authenticate_caller(self.headers)
+            if caller is None:
+                self._respond(401, {"error": "unauthorized"})
+                return
 
         if path == QUOTE_PATH:
             params = self._json_body(body)
             if params is None:
                 return
-            merchant_id = resolve_merchant_id(params)
-            if merchant_id:
-                params["merchant_id"] = merchant_id
+            if not self._stamp_merchant(caller, params):
+                return
             if QUOTE_TYPE:
                 params["type"] = QUOTE_TYPE
             self._forward("quote", lambda: client.create_quote(params))
@@ -353,9 +453,8 @@ class Handler(BaseHTTPRequestHandler):
             params = self._json_body(body)
             if params is None:
                 return
-            merchant_id = resolve_merchant_id(params)
-            if merchant_id:
-                params["merchant_id"] = merchant_id
+            if not self._stamp_merchant(caller, params):
+                return
             self._forward("order", lambda: client.create_order(params))
             return
 
@@ -432,6 +531,9 @@ class Handler(BaseHTTPRequestHandler):
 if __name__ == "__main__":
     if not API_KEY:
         print("warning: SEEL_API_KEY not set - quote proxy will fail")
+    if not MERCHANT_ID and RETAILER_MERCHANTS is None:
+        print("warning: neither SEEL_MERCHANT_ID nor SEEL_RETAILER_MERCHANTS set - "
+              "merchant_id is taken from the request body, which only a demo may do")
     server = ThreadingHTTPServer((HOST, PORT), Handler)
     host, port = server.server_address[:2]
     print(f"listening on http://{host}:{port}", flush=True)
