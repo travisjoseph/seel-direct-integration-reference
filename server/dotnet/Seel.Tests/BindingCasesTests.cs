@@ -47,7 +47,7 @@ public class BindingCasesTests
     [Fact]
     public void BothMerchantSettingsStopStartup() =>
         Assert.Throws<InvalidOperationException>(
-            () => MerchantBinding.From("m-solo", """{"https://dealer-a.example":"m-a"}"""));
+            () => MerchantBinding.From("m-solo", """{"https://shop-a.example":"m-a"}"""));
 
     [Fact]
     public void NeitherMerchantSettingFallsBackToTheBody() =>
@@ -97,14 +97,14 @@ public class BindingCasesTests
     [Fact]
     public async Task PreflightEchoesOnlyARegisteredOrigin()
     {
-        var table = new MerchantBinding.RetailerTable(new Dictionary<string, string> { ["https://dealer-a.example"] = "m-a" });
+        var table = new MerchantBinding.RetailerTable(new Dictionary<string, string> { ["https://shop-a.example"] = "m-a" });
         await using var server = await RunningServer.StartAsync(RunningServer.Config("http://127.0.0.1:9", table));
 
-        using var known = await Preflight(server, "https://dealer-a.example");
+        using var known = await Preflight(server, "https://shop-a.example");
         using var unknown = await Preflight(server, "https://other.example");
 
         Assert.Equal(HttpStatusCode.NoContent, known.StatusCode);
-        Assert.Equal("https://dealer-a.example", AllowOrigin(known));
+        Assert.Equal("https://shop-a.example", AllowOrigin(known));
         Assert.Equal("Origin", Assert.Single(known.Headers.Vary));
         Assert.Null(AllowOrigin(unknown));
     }

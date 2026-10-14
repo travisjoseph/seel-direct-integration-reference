@@ -127,10 +127,10 @@ test("shared binding cases", async (t) => {
 });
 
 test("preflight echoes only a registered origin", async () => {
-  configure(null, { "https://dealer-a.example": "m-a" });
-  const known = await request("OPTIONS", paths.quote, null, "https://dealer-a.example");
+  configure(null, { "https://shop-a.example": "m-a" });
+  const known = await request("OPTIONS", paths.quote, null, "https://shop-a.example");
   const unknown = await request("OPTIONS", paths.quote, null, "https://other.example");
-  assert.strictEqual(known.res.headers["access-control-allow-origin"], "https://dealer-a.example");
+  assert.strictEqual(known.res.headers["access-control-allow-origin"], "https://shop-a.example");
   assert.strictEqual(known.res.headers.vary, "Origin");
   assert.strictEqual(unknown.res.headers["access-control-allow-origin"], undefined);
 });

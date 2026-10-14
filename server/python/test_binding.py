@@ -130,11 +130,11 @@ class SharedBindingCases(unittest.TestCase):
                     self.assertEqual(RecordingSeel.received, [], "a refused request reached Seel")
 
     def test_preflight_echoes_only_a_registered_origin(self):
-        table = {"https://dealer-a.example": "m-a"}
+        table = {"https://shop-a.example": "m-a"}
         with mock.patch.object(example_server, "RETAILER_MERCHANTS", table):
-            known, _ = self.request("OPTIONS", PATHS["quote"], None, "https://dealer-a.example")
+            known, _ = self.request("OPTIONS", PATHS["quote"], None, "https://shop-a.example")
             unknown, _ = self.request("OPTIONS", PATHS["quote"], None, "https://other.example")
-        self.assertEqual(known.getheader("Access-Control-Allow-Origin"), "https://dealer-a.example")
+        self.assertEqual(known.getheader("Access-Control-Allow-Origin"), "https://shop-a.example")
         self.assertEqual(known.getheader("Vary"), "Origin")
         self.assertIsNone(unknown.getheader("Access-Control-Allow-Origin"))
 
