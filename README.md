@@ -115,6 +115,40 @@ mapping belongs to the platform, so this reference does not invent one.
 Read this code for the request shapes and the lifecycle, not as a hardened
 gateway.
 
+## Platforms with one merchant per retailer
+
+A platform that holds one API key creates a separate Seel merchant for each
+retailer. It runs the same lifecycle for every one of them.
+
+**Enable a retailer.** Call `create_merchant()` with a `seel_services`
+entry that sets `is_enabled` to true, `is_default_on` and `coverages`.
+Store the returned `merchant_id` against that retailer's storefront. Every
+later call for that retailer uses it.
+
+**Change a retailer.** Call `update_merchant()` to change shop details or
+toggle `is_default_on`. To turn the program off, for example when a
+retailer opts out or billing fails, set `is_enabled` to false with a
+`disabled_reason`. Set it back to true to re-enable. Call `get_merchant()`
+to confirm the configuration Seel holds.
+
+**Checkout.** The widget sends the cart to the proxy. The proxy resolves
+which retailer the request came from and stamps that retailer's
+`merchant_id`. [Deployment shapes](#deployment-shapes) covers how to bind a
+request to a retailer.
+
+**Orders.** Call `create_order()` for every order. When the shopper opted
+out, send an empty `seel_services` array. If your program asks for it, also
+pass the latest quote ID in `extra_info.quote_id` so Seel can measure
+attach rate.
+
+**Webhooks.** Use one endpoint for every retailer. Route each event to its
+retailer by `merchant_id`.
+
+**Widget.** Seel's hosted widget bundle calls Seel from the browser with an
+embedded key, so it cannot sit behind a platform proxy. A platform that
+must keep its one key server-side uses `widget/seel-widget.js`. It exposes
+the hosted bundle's interface and quotes through the proxy.
+
 ## Proxy routes
 
 All routes are POST.
@@ -151,8 +185,8 @@ names. It rejects `batch` as an order ID for the same reason, so the
 update-order route cannot reach the batch endpoint.
 
 The proxy forwards only the write path. Merchant onboarding
-(`create_merchant`, `create_orders_batch`) runs from your onboarding flow,
-not a retailer request, so it has no route. Neither do claims or the `GET`
+(`create_merchant`, `get_merchant`, `create_orders_batch`) runs from your
+onboarding flow, not a retailer request, so it has no route. Neither do claims or the `GET`
 lookups. The clients expose all of them for you to call directly.
 
 ## Integration flow
@@ -308,8 +342,9 @@ integration can look healthy while covering nothing:
 | `seel_services` sent as an object instead of an array | `500` from the JSON parser |
 | `seel_services` entry with no `price` | `200`, `contract_id: null`, `error: "system error"` inside the entry |
 
-The Python, Node and Rust clients check every `create_order` response for a
-real `contract_id` to catch this.
+The Python, Node and Rust clients check each `create_order` response that
+attaches coverage for a real `contract_id` to catch this. In Java, call
+`SeelValidation.contractNotMintedReason`, as the example server does.
 
 Seel does not check that the attached `price` matches the quoted premium,
 or that the order's line items match the quoted cart. It mints a contract
@@ -366,18 +401,21 @@ server uses to stamp, validate and check each request.
 All four ports run the same cases from `server/validation-cases.json`. The
 fixture catches drift between ports. It checks that all four make the same
 accept or reject decision and report every expected field path, not that
-any one port is correct. Each suite uses only its runtime's standard
-library.
+any one port is correct. The Python, Node and Java suites use only their
+runtime's standard library. The Rust suite uses the crate's own
+dependencies.
 
 The fixture covers payload validation and the contract-minted check,
 including when that check runs. It does not cover routing, path-parameter
-decoding or the proxy's error mapping, which differ per port. Rust has
-local tests for routing and path decoding. Nothing tests the error
-mapping.
+decoding or the proxy's error mapping, which differ per port. Python and
+Node test the proxy's error mapping and the client's transport edge cases
+against a local mock of Seel. Rust tests routing, path decoding and the
+client's handling of 2xx bodies. Each port also checks that `get_merchant`
+sends a `GET` to the escaped merchant path.
 
 ```bash
 python3 -m unittest discover server/python
-node --test server/node/test-validation.js
+node --test server/node/test-validation.js server/node/test-proxy.js
 (cd server/rust && cargo test)
 (cd server/java && javac *.java && java SeelValidationTest)
 ```
