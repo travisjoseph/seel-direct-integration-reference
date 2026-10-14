@@ -1,0 +1,5 @@
+<Solution>
+  <Project Path="Seel.Client/Seel.Client.csproj" />
+  <Project Path="Seel.ExampleServer/Seel.ExampleServer.csproj" />
+  <Project Path="Seel.Tests/Seel.Tests.csproj" />
+</Solution>
