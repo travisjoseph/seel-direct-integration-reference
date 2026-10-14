@@ -24,6 +24,7 @@ const upstream = http.createServer((req, res) => {
   req.on("data", (c) => chunks.push(c));
   req.on("end", () => {
     const path = req.url;
+    if (req.method === "GET") return res.writeHead(200).end(JSON.stringify({ method: "GET", path }));
     if (path === "/v1/ecommerce/orders/EMPTY/cancel") return res.writeHead(200).end();
     if (path === "/v1/ecommerce/orders/TEXT/cancel") {
       return res.writeHead(200, { "Content-Type": "text/plain" }).end("OK");
@@ -99,6 +100,14 @@ test("client: non-JSON 2xx body carries the status and the raw text", async () =
     assert.strictEqual(exc.status, 200);
     assert.deepStrictEqual(exc.body, { seel_raw_body: "OK" });
     return true;
+  });
+});
+
+test("client: getMerchant is a GET on the escaped merchant path", async () => {
+  const client = new SeelClient("k", baseUrl);
+  assert.deepStrictEqual(await client.getMerchant("m/1 x"), {
+    method: "GET",
+    path: "/v1/ecommerce/merchants/m%2F1%20x",
   });
 });
 

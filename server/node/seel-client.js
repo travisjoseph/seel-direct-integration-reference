@@ -362,6 +362,10 @@ class SeelClient {
     return this._request("POST", `/ecommerce/merchants/${pathParam(merchantId)}`, payload);
   }
 
+  getMerchant(merchantId) {
+    return this._request("GET", `/ecommerce/merchants/${pathParam(merchantId)}`);
+  }
+
   // -- Quotes -------------------------------------------------------------
 
   /**

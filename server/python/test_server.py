@@ -55,6 +55,9 @@ class MockSeel(BaseHTTPRequestHandler):
         else:
             self._reply(200, b'{"ok": true}')
 
+    def do_GET(self):
+        self._reply(200, json.dumps({"method": "GET", "path": self.path}).encode())
+
     def _reply(self, status, body, content_type="application/json"):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -121,6 +124,25 @@ class SignatureVerification(unittest.TestCase):
         # hmac.compare_digest raises TypeError on non-ASCII str input, which
         # used to escape the handler and drop the connection.
         self.assertFalse(verify_webhook_signature(b"{}", "\xe9\xe9", SECRET))
+
+
+class ClientRequests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.upstream = serve(MockSeel)
+        cls.client = SeelClient(
+            api_key="dummy", base_url=f"http://127.0.0.1:{cls.upstream.server_address[1]}"
+        )
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.upstream.shutdown()
+
+    def test_get_merchant_is_a_get_on_the_escaped_merchant_path(self):
+        self.assertEqual(
+            self.client.get_merchant("m/1 x"),
+            {"method": "GET", "path": "/v1/ecommerce/merchants/m%2F1%20x"},
+        )
 
 
 class ServerBehavior(unittest.TestCase):
