@@ -195,7 +195,7 @@ test("updateCheckboxStatus corrects state, re-renders the box, and sticks across
   assert.deepEqual(changes, [true, false], "no event when already in that state");
 
   const [, status] = await quoteOnce(w);
-  assert.equal(status, false, "platform-set choice overrides is_default_on on re-quote");
+  assert.equal(status, false, "partner-platform-set choice overrides is_default_on on re-quote");
 
   w.sdk.updateCheckboxStatus(true);
   assert.deepEqual(changes, [true, false, true]);

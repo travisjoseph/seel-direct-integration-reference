@@ -24,7 +24,7 @@
   ],
   "binding_cases": [
     {
-      "name": "platform: a known origin stamps its merchant",
+      "name": "partner platform: a known origin stamps its merchant",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -35,7 +35,7 @@
       "allow_origin": "https://dealer-a.example"
     },
     {
-      "name": "platform: the Origin header matches case-insensitively",
+      "name": "partner platform: the Origin header matches case-insensitively",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -46,7 +46,7 @@
       "allow_origin": "https://dealer-b.example"
     },
     {
-      "name": "platform: a body merchant_id that agrees is accepted",
+      "name": "partner platform: a body merchant_id that agrees is accepted",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -57,7 +57,7 @@
       "allow_origin": "https://dealer-a.example"
     },
     {
-      "name": "platform: a body merchant_id naming another retailer is refused",
+      "name": "partner platform: a body merchant_id naming another retailer is refused",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -68,7 +68,7 @@
       "allow_origin": "https://dealer-a.example"
     },
     {
-      "name": "platform: an unknown origin is refused",
+      "name": "partner platform: an unknown origin is refused",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -79,7 +79,7 @@
       "allow_origin": null
     },
     {
-      "name": "platform: a missing origin is refused even with a body merchant_id",
+      "name": "partner platform: a missing origin is refused even with a body merchant_id",
       "route": "quote",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -90,7 +90,7 @@
       "allow_origin": null
     },
     {
-      "name": "platform: create order stamps the origin's merchant",
+      "name": "partner platform: create order stamps the origin's merchant",
       "route": "order",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},
@@ -101,7 +101,7 @@
       "allow_origin": "https://dealer-b.example"
     },
     {
-      "name": "platform: create order refuses a mismatched body merchant_id",
+      "name": "partner platform: create order refuses a mismatched body merchant_id",
       "route": "order",
       "single_merchant_id": null,
       "retailer_merchants": {"https://dealer-a.example": "m-a", "https://dealer-b.example": "m-b"},

@@ -9,7 +9,7 @@ public sealed record Caller(string? Origin);
 public sealed class MerchantBindingException(string message) : Exception(message);
 
 /// <summary>
-/// The two seams a platform replaces. Register its own implementation in DI
+/// The two seams a partner platform replaces. Register its own implementation in DI
 /// in place of <see cref="OriginRetailerResolver"/>.
 /// </summary>
 public interface IRetailerResolver
@@ -39,11 +39,11 @@ public sealed class OriginRetailerResolver(MerchantBinding binding) : IRetailerR
     ///
     /// Server-to-server routes (orders, fulfillments, cancel) have no Origin.
     /// This demo accepts them from anyone, which is only safe because it holds
-    /// a sandbox key and listens on localhost. A platform authenticates its
+    /// a sandbox key and listens on localhost. A partner platform authenticates its
     /// retailers' backends with its own credentials, returns the retailer
     /// identity here, and maps it to a merchant the same way the origin is
     /// mapped. Retailers never receive a Seel API key: one key covers every
-    /// retailer on the platform and would let any holder act as any other.
+    /// retailer on the partner platform and would let any holder act as any other.
     /// </remarks>
     public Caller? AuthenticateCaller(HttpRequest request)
     {
@@ -57,13 +57,13 @@ public sealed class OriginRetailerResolver(MerchantBinding binding) : IRetailerR
     /// stamped onto everything, so storefront and pipeline code carry no
     /// program-specific values.
     ///
-    /// Platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to
+    /// Partner platform proxy: SEEL_RETAILER_MERCHANTS maps each storefront origin to
     /// its merchant. The merchant comes from the caller, never the body, which
     /// is what stops one retailer quoting or ordering against another's
     /// merchant ID. A body merchant_id that disagrees is refused rather than
     /// overwritten, so a misconfigured storefront fails loudly. The origin is
     /// the only identity this demo knows, so with a table set a backend call
-    /// without one, such as create order, is refused until the platform maps
+    /// without one, such as create order, is refused until the partner platform maps
     /// its own retailer credentials here too.
     ///
     /// With neither set, the body value is forwarded so the unconfigured demo

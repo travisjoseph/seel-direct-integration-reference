@@ -334,7 +334,7 @@
   }
 
   /**
-   * Set the opt-in from platform code, e.g. restoring a choice saved on the
+   * Set the opt-in from partner platform code, e.g. restoring a choice saved on the
    * cart. It counts as the shopper's choice, so it survives re-quotes. With
    * no offer on screen, coverage stays off.
    */

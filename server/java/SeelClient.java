@@ -12,7 +12,7 @@
  *   order shipped/delivered  -> createFulfillment / updateFulfillment
  *   order changed/cancelled  -> updateOrder / cancelOrder
  *   return or claim filed    -> createClaim (+ updateClaim with the decision
- *                               when the platform adjudicates)
+ *                               when the partner platform adjudicates)
  *   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
  *
  * JDK 17+ standard library only, no dependencies.
@@ -116,7 +116,7 @@ public class SeelClient {
 
     /**
      * Onboard one retailer. Call it when they enable the program; retailers
-     * group under your platform organization on Seel's side. Follow with
+     * group under your partner platform organization on Seel's side. Follow with
      * createOrdersBatch and at least 30 days of order history so Seel can
      * run risk analysis.
      *
@@ -209,7 +209,7 @@ public class SeelClient {
 
     /**
      * Cancel a synced order; its WFP coverage cancels with it. Refunding the
-     * WFP fee and tax to the shopper is the platform's job - see
+     * WFP fee and tax to the shopper is the partner platform's job - see
      * Cancellation in the README.
      */
     public String cancelOrder(String orderId)
@@ -239,7 +239,7 @@ public class SeelClient {
     // -- Claims ----------------------------------------------------------------
 
     /**
-     * Register a claim when the shopper files in the platform's returns
+     * Register a claim when the shopper files in the partner platform's returns
      * flow. Delivery-issue claims carry claim_type loss | damage | theft |
      * delay plus claim_details with attachments; return-shipping claims
      * carry claim_type return_shipping plus the RMA number, the return
@@ -252,7 +252,7 @@ public class SeelClient {
     }
 
     /**
-     * Submit the adjudication decision on programs where the platform
+     * Submit the adjudication decision on programs where the partner platform
      * adjudicates: decision accept | reject, with a reject_reason code and
      * shopper-facing details on rejections. Claim items and amounts cannot
      * be changed after creation. Seel records the outcome and fires

@@ -11,7 +11,7 @@ Platform Integration Quickstart
   order shipped/delivered  -> create_fulfillment / update_fulfillment
   order changed/cancelled  -> update_order / cancel_order
   return or claim filed    -> create_claim (+ update_claim with the decision
-                              when the platform adjudicates)
+                              when the partner platform adjudicates)
   async status changes     -> webhooks (contract.*, claim.*), HMAC-signed
 
 Stdlib only. Written to be ported.
@@ -344,7 +344,7 @@ class SeelClient:
 
     def create_merchant(self, payload: dict) -> dict:
         """Onboard one retailer. Call it when they enable the program;
-        retailers group under your platform organization on Seel's side.
+        retailers group under your partner platform organization on Seel's side.
         Follow with create_orders_batch and at least 30 days of order
         history so Seel can run risk analysis.
 
@@ -456,7 +456,7 @@ class SeelClient:
 
     def cancel_order(self, order_id: str) -> dict:
         """Cancel a synced order; its WFP coverage cancels with it.
-        Refunding the WFP fee and tax to the shopper is the platform's job -
+        Refunding the WFP fee and tax to the shopper is the partner platform's job -
         see Cancellation in the README."""
         return self._request("POST", f"/ecommerce/orders/{_path_param(order_id)}/cancel")
 
@@ -477,7 +477,7 @@ class SeelClient:
     # -- Claims -------------------------------------------------------------
 
     def create_claim(self, payload: dict) -> dict:
-        """Register a claim when the shopper files in the platform's returns
+        """Register a claim when the shopper files in the partner platform's returns
         flow. Delivery-issue claims carry claim_type loss | damage | theft |
         delay plus claim_details with attachments; return-shipping claims
         carry claim_type return_shipping plus the RMA number, the return
@@ -486,7 +486,7 @@ class SeelClient:
         return self._request("POST", "/ecommerce/claims", payload)
 
     def update_claim(self, claim_id: str, payload: dict) -> dict:
-        """Submit the adjudication decision on programs where the platform
+        """Submit the adjudication decision on programs where the partner platform
         adjudicates: decision accept | reject, with a reject_reason code and
         shopper-facing details on rejections. Claim items and amounts cannot
         be changed after creation. Seel records the outcome and fires
