@@ -232,10 +232,10 @@ impl BodyReject {
 
 /// Read a body of at most `MAX_BODY_BYTES`. A declared Content-Length over
 /// the cap is refused up front so nothing is read; a chunked or lying body
-/// is cut off while reading.
-async fn read_capped<B>(body: B) -> Result<Vec<u8>, BodyReject>
+/// is cut off while reading. The caller keeps the body, to drain it.
+async fn read_capped<B>(body: &mut B) -> Result<Vec<u8>, BodyReject>
 where
-    B: Body<Data = Bytes>,
+    B: Body<Data = Bytes> + Unpin,
     B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
 {
     if body.size_hint().lower() > MAX_BODY_BYTES as u64 {
@@ -248,8 +248,33 @@ where
     }
 }
 
-async fn read_body(body: Incoming) -> Result<Vec<u8>, BodyReject> {
-    match tokio::time::timeout(BODY_READ_TIMEOUT, read_capped(body)).await {
+/// Read and drop the rest of a body. True once its end was reached, which
+/// leaves the connection in sync for the next request.
+async fn drain<B: Body + Unpin>(body: &mut B) -> bool {
+    while let Some(frame) = body.frame().await {
+        if frame.is_err() {
+            return false;
+        }
+    }
+    true
+}
+
+/// Read the body within `BODY_READ_TIMEOUT`. A body past the cap is read
+/// and dropped inside the same window before the 413 goes out, so the
+/// connection is not closed on unread bytes: that close resets it, and a
+/// client still sending sees the reset before it reads the 413 (RFC 9112
+/// section 9.6). Nothing past the cap is kept.
+async fn read_body<B>(mut body: B) -> Result<Vec<u8>, BodyReject>
+where
+    B: Body<Data = Bytes> + Unpin,
+    B::Error: Into<Box<dyn std::error::Error + Send + Sync>>,
+{
+    let deadline = tokio::time::Instant::now() + BODY_READ_TIMEOUT;
+    match tokio::time::timeout_at(deadline, read_capped(&mut body)).await {
+        Ok(Err(mut reject)) if reject.status == 413 => {
+            reject.unread = !matches!(tokio::time::timeout_at(deadline, drain(&mut body)).await, Ok(true));
+            Err(reject)
+        }
         Ok(result) => result,
         Err(_) => Err(BodyReject::timed_out()),
     }
@@ -740,19 +765,19 @@ mod tests {
     }
 
     fn block_on<F: std::future::Future>(f: F) -> F::Output {
-        tokio::runtime::Builder::new_current_thread().build().unwrap().block_on(f)
+        tokio::runtime::Builder::new_current_thread().enable_time().build().unwrap().block_on(f)
     }
 
     #[test]
     fn body_cap_refuses_declared_length_without_reading() {
-        let (never_read, polled) = fake(Some(MAX_BODY_BYTES as u64 + 1), vec![Bytes::from("a")]);
-        let reject = block_on(read_capped(never_read)).err().unwrap();
+        let (mut never_read, polled) = fake(Some(MAX_BODY_BYTES as u64 + 1), vec![Bytes::from("a")]);
+        let reject = block_on(read_capped(&mut never_read)).err().unwrap();
         assert_eq!(reject.status, 413);
         assert_eq!(reject.error, "request body exceeds 1048576 bytes");
         assert_eq!(polled.load(Ordering::SeqCst), 0);
 
-        let (exact, _) = fake(Some(MAX_BODY_BYTES as u64), vec![Bytes::from(vec![b'a'; MAX_BODY_BYTES])]);
-        assert!(block_on(read_capped(exact)).is_ok());
+        let (mut exact, _) = fake(Some(MAX_BODY_BYTES as u64), vec![Bytes::from(vec![b'a'; MAX_BODY_BYTES])]);
+        assert!(block_on(read_capped(&mut exact)).is_ok());
     }
 
     /// A chunked body declares no length, so the cap has to hold while
@@ -760,13 +785,31 @@ mod tests {
     #[test]
     fn body_cap_holds_while_reading_an_undeclared_length() {
         let frame = Bytes::from(vec![b'a'; MAX_BODY_BYTES / 2]);
-        let (body, polled) = fake(None, vec![frame.clone(); 4]);
-        let reject = block_on(read_capped(body)).err().unwrap();
+        let (mut body, polled) = fake(None, vec![frame.clone(); 4]);
+        let reject = block_on(read_capped(&mut body)).err().unwrap();
         assert_eq!(reject.status, 413);
         assert_eq!(polled.load(Ordering::SeqCst), 3, "stops at the first frame past the cap");
 
-        let (body, _) = fake(None, vec![frame.clone(); 2]);
-        assert_eq!(block_on(read_capped(body)).unwrap(), vec![b'a'; MAX_BODY_BYTES]);
+        let (mut body, _) = fake(None, vec![frame.clone(); 2]);
+        assert_eq!(block_on(read_capped(&mut body)).unwrap(), vec![b'a'; MAX_BODY_BYTES]);
+    }
+
+    /// Whatever is left past the cap is read and dropped before the 413, so
+    /// the connection is never closed on unread bytes and can be reused.
+    #[test]
+    fn an_oversized_body_is_drained_before_the_413() {
+        let frame = Bytes::from(vec![b'a'; MAX_BODY_BYTES / 2]);
+        let (body, polled) = fake(None, vec![frame.clone(); 4]);
+        let reject = block_on(read_body(body)).err().unwrap();
+        assert_eq!(reject.status, 413);
+        assert_eq!(polled.load(Ordering::SeqCst), 5, "read through to the end of the body");
+        assert!(reject.into_response().headers().get("Connection").is_none());
+
+        let (declared, polled) = fake(Some(MAX_BODY_BYTES as u64 + 1), vec![Bytes::from("a")]);
+        let reject = block_on(read_body(declared)).err().unwrap();
+        assert_eq!(reject.status, 413);
+        assert_eq!(polled.load(Ordering::SeqCst), 2, "a refused declared length is drained too");
+        assert!(reject.into_response().headers().get("Connection").is_none());
     }
 
     /// Only a reject that leaves bytes in the socket closes the connection.

@@ -48,6 +48,7 @@ doesn't serve the demo page:
 import json
 import os
 import re
+import socket
 from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Optional
@@ -71,6 +72,12 @@ PORT = int(os.environ.get("PORT", "8787"))
 # order is a few KB; the cap exists so a single caller cannot make the
 # process buffer arbitrary input.
 MAX_BODY_BYTES = 1048576
+# A body past the cap is read and dropped before the 413 goes out, so the
+# connection does not close on unread bytes: that close resets the
+# connection, and a client still sending sees the reset before it reads
+# the 413 (RFC 9112 section 9.6). Nothing is kept; this bounds how long a
+# client that stalls mid-body holds the handler.
+DRAIN_TIMEOUT_SECONDS = 5
 API_KEY = os.environ.get("SEEL_API_KEY", "")
 WEBHOOK_SECRET = os.environ.get("SEEL_WEBHOOK_SECRET", "")
 BASE_URL = os.environ.get("SEEL_BASE_URL", SANDBOX_BASE_URL)
@@ -303,29 +310,46 @@ class Handler(BaseHTTPRequestHandler):
         capped as it streams, so neither framing can push more than
         MAX_BODY_BYTES into memory.
         """
-        if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
-            try:
+        try:
+            if "chunked" in self.headers.get("Transfer-Encoding", "").lower():
                 body = self._read_chunked()
-            except ValueError:
-                self._respond(400, {"error": "malformed chunked request body"})
-                return None
-        else:
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                length = 0
-            body = None if length > MAX_BODY_BYTES else self.rfile.read(max(length, 0))
+            else:
+                try:
+                    length = int(self.headers.get("Content-Length", "0"))
+                except ValueError:
+                    length = 0
+                if length > MAX_BODY_BYTES:
+                    self._discard(length)
+                    body = None
+                else:
+                    body = self.rfile.read(max(length, 0))
+        except ValueError:
+            self._respond(400, {"error": "malformed chunked request body"})
+            return None
+        except socket.timeout:
+            # Only set while dropping a body past the cap, so the 413 still
+            # fits; the close after it may reset, as it would have anyway.
+            body = None
         if body is None:
             self._respond(413, {"error": f"request body exceeds {MAX_BODY_BYTES} bytes"})
         return body
+
+    def _discard(self, size: int) -> None:
+        """Read and drop size bytes of body in slices, never holding them."""
+        self.connection.settimeout(DRAIN_TIMEOUT_SECONDS)
+        while size > 0:
+            read = self.rfile.read(min(size, 65536))
+            if not read:
+                return
+            size -= len(read)
 
     def _read_chunked(self):
         """Decode a Transfer-Encoding: chunked body (RFC 9112 section 7.1).
 
         http.server does not decode it, so a signed webhook sent chunked
         would otherwise verify against an empty body and 401. Returns None
-        once the declared chunks exceed the cap, raises ValueError on
-        malformed framing.
+        once the declared chunks exceed the cap, after decoding and
+        dropping the rest; raises ValueError on malformed framing.
         """
         body = bytearray()
         while True:
@@ -337,15 +361,20 @@ class Handler(BaseHTTPRequestHandler):
             size = int(digits, 16)
             if size == 0:
                 break
-            if len(body) + size > MAX_BODY_BYTES:
-                return None
-            chunk = self.rfile.read(size)
-            if len(chunk) != size or self.rfile.read(2) != b"\r\n":
+            if body is not None and len(body) + size > MAX_BODY_BYTES:
+                body = None
+            if body is None:
+                self._discard(size)
+            else:
+                chunk = self.rfile.read(size)
+                if len(chunk) != size:
+                    raise ValueError("truncated chunk")
+                body += chunk
+            if self.rfile.read(2) != b"\r\n":
                 raise ValueError("truncated chunk")
-            body += chunk
         while self.rfile.readline(65537) not in (b"\r\n", b"\n", b""):
             pass  # trailer fields carry nothing this server uses
-        return bytes(body)
+        return None if body is None else bytes(body)
 
     def _stamp_merchant(self, caller: Caller, params: dict) -> bool:
         """Stamp the resolved merchant into params, or answer 403 and return False."""

@@ -360,10 +360,13 @@ function respond(res, status, body) {
  */
 function readBody(req, res) {
   const tooLarge = () => {
-    // Close instead of draining: the rest of the body is exactly what the
-    // cap exists to avoid reading. Node flushes the response first.
-    res.setHeader("Connection", "close");
     respond(res, 413, { error: `request body exceeds ${MAX_BODY_BYTES} bytes` });
+    // Discard the rest instead of closing on it. A close with bytes still
+    // unread resets the connection, and a client still sending sees the
+    // reset before it reads the 413 (RFC 9112 section 9.6). Nothing is
+    // buffered, and server.requestTimeout cuts off a client that never
+    // finishes.
+    req.resume();
   };
   if (Number(req.headers["content-length"]) > MAX_BODY_BYTES) {
     tooLarge();

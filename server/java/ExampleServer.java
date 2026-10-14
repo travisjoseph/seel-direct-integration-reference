@@ -563,7 +563,7 @@ public class ExampleServer {
         if (declared != null) {
             try {
                 if (Long.parseLong(declared.strip()) > MAX_BODY_BYTES) {
-                    respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
+                    tooLarge(exchange);
                     return null;
                 }
             } catch (NumberFormatException e) {
@@ -580,10 +580,26 @@ public class ExampleServer {
             return null;
         }
         if (body.length > MAX_BODY_BYTES) {
-            respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
+            tooLarge(exchange);
             return null;
         }
         return body;
+    }
+
+    /**
+     * Answer 413 once the rest of the body has been read and dropped. The
+     * JDK server closes the connection on a body left unread, and a close
+     * with bytes still in the socket resets it: a client still sending then
+     * sees the reset before the 413 (RFC 9112 section 9.6). Nothing is
+     * kept, and maxReqTime still cuts off a client that never finishes.
+     */
+    private static void tooLarge(HttpExchange exchange) throws IOException {
+        try {
+            exchange.getRequestBody().transferTo(OutputStream.nullOutputStream());
+        } catch (IOException e) {
+            // the client gave up mid-body; answer anyway
+        }
+        respond(exchange, 413, error("request body exceeds " + MAX_BODY_BYTES + " bytes"));
     }
 
     /**
