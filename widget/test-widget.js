@@ -37,7 +37,7 @@ function makeElement(id) {
   return el;
 }
 
-function loadWidget() {
+function loadWidget(globals = {}) {
   const mount = makeElement("seel-wfp-widget-root");
   const document = {
     getElementById(id) {
@@ -48,7 +48,7 @@ function loadWidget() {
   const window = {};
   const errors = [];
   const console = { error: (...a) => errors.push(a), warn: () => {}, log: () => {} };
-  vm.runInNewContext(SOURCE, { window, document, console, setTimeout, clearTimeout, Promise });
+  vm.runInNewContext(SOURCE, { window, document, console, setTimeout, clearTimeout, Promise, ...globals });
   const sdk = window.SeelSDK;
   const sent = [];
   let respond = () => QUOTE;
@@ -98,6 +98,36 @@ test("createQuote callback receives (quote, checkboxStatus) with bundle field na
   assert.deepEqual({ ...quote.eligibleItems[0] }, { lineItemId: "line_1", variantId: "v_1" });
   assert.equal(quote.extraInfo.termsUrl, "https://example.com/t");
   assert.equal(w.checkbox().checked, true, "rendered checkbox matches the reported status");
+});
+
+test("displayPrice carries the currency when the quote has only a currency code", async () => {
+  const w = loadWidget();
+  const bare = { ...QUOTE, price: 0.98, display_amounts: undefined, extra_info: { widget_title: "Worry-Free Delivery" } };
+  w.setResponder(() => bare);
+  const [quote] = await quoteOnce(w);
+  assert.equal(quote.displayPrice, "$0.98");
+  assert.match(w.mount.innerHTML, /<span>\$0\.98<\/span>/);
+
+  w.setResponder(() => ({ ...bare, extra_info: { currency_symbol: "£" } }));
+  assert.equal((await quoteOnce(w))[0].displayPrice, "£0.98");
+
+  w.setResponder(() => ({ ...bare, currency: undefined }));
+  assert.equal((await quoteOnce(w))[0].displayPrice, "0.98");
+
+  w.setResponder(() => ({ ...bare, currency: "NOTACODE" }));
+  assert.equal((await quoteOnce(w))[0].displayPrice, "0.98");
+});
+
+test("displayPrice falls back to the default symbol where narrowSymbol is unsupported", async () => {
+  const OldIntl = {
+    NumberFormat: function (locale, opts) {
+      if (opts.currencyDisplay === "narrowSymbol") throw new RangeError("Invalid currencyDisplay");
+      return new Intl.NumberFormat("en-US", opts);
+    },
+  };
+  const w = loadWidget({ Intl: OldIntl });
+  w.setResponder(() => ({ ...QUOTE, price: 0.98, display_amounts: undefined, extra_info: {} }));
+  assert.equal((await quoteOnce(w))[0].displayPrice, "$0.98");
 });
 
 test("createQuote returns a Promise of the quote", async () => {

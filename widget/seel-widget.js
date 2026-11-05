@@ -100,6 +100,26 @@
     return out;
   }
 
+  // The Ecomm quote API returns only a currency code, no symbol or display_amounts.
+  function formatPrice(q, extra) {
+    if (q.display_amounts && q.display_amounts.price) return q.display_amounts.price;
+    var amount = q.price === null || q.price === "" ? NaN : Number(q.price);
+    if (!isFinite(amount)) return String(q.price);
+    var symbol = extra.currency_symbol || q.currency_symbol;
+    if (symbol) return symbol + amount.toFixed(2);
+    var code = q.currency || q.currency_code;
+    if (code && typeof Intl !== "undefined") {
+      // narrowSymbol avoids "US$" outside the US; older engines throw on it.
+      var styles = [{ currencyDisplay: "narrowSymbol" }, {}];
+      for (var i = 0; i < styles.length; i++) {
+        try {
+          return new Intl.NumberFormat(undefined, Object.assign({ style: "currency", currency: code }, styles[i])).format(amount);
+        } catch (e) {}
+      }
+    }
+    return String(q.price);
+  }
+
   /**
    * The quote handed to callbacks. Field names follow the hosted bundle:
    * status, quoteId, price, currencyCode, currencySymbol, eligibleItems and
@@ -129,7 +149,7 @@
       displayAmounts: q.display_amounts,
       widgetCopy: q.widget_copy,
       coverages: q.coverages || [],
-      displayPrice: (q.display_amounts && q.display_amounts.price) || String(q.price),
+      displayPrice: formatPrice(q, extra),
       modalDetails: Array.isArray(copy.modal_details_text) ? copy.modal_details_text : [],
       raw: q,
     };
